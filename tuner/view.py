@@ -725,16 +725,16 @@ class TunerView:
 
         import sys
         if sys.platform == 'linux':
-            msg = _("The Strobe Tuner requires PortAudio.\n\n"
+            msg = _("The Stroboscopic Tuner requires PortAudio.\n\n"
                     "Install it with:\n"
                     "  sudo apt install libportaudio2\n\n"
                     "Then restart the application.")
         elif sys.platform == 'darwin':
-            msg = _("The Strobe Tuner is not available on this Mac.\n\n"
+            msg = _("The Stroboscopic Tuner is not available on this Mac.\n\n"
                     "This feature requires Apple Silicon (M1 or newer).\n\n"
                     "All other features work normally.")
         else:
-            msg = _("The Strobe Tuner is not available on this system.\n\n"
+            msg = _("The Stroboscopic Tuner is not available on this system.\n\n"
                     "If you see this on Windows, try reinstalling the app.\n\n"
                     "All other features work normally.")
         tk.Label(frame, text=msg, bg=bg, fg="#AAAAAA",

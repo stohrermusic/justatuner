@@ -4,14 +4,15 @@ A free strobe tuner and just-intonation exerciser for musicians.
 
 Two tabs in one Tk app:
 
-- **Strobe Tuner** — 12-wheel chromatic stroboscopic tuner with optional
-  GPU rendering. Originally built for [Stohrer Sax Shop Companion][ssc]
-  for saxophone repair work; spun out here standalone for everyone else.
-- **JI Exerciser** — drone playback in any voicing (root / fifth / major /
-  minor triad), live pitch detection, just-intonation interval analysis,
-  and a vintage round Lissajous CRT display. The original [JustATone][jat]
-  Python prototype, preserved here after that project pivoted to a
-  Rust/bevy generative-art garden.
+- **Stroboscopic Tuner** — 12-wheel chromatic strobe-style tuner with
+  optional GPU rendering. Originally built for [Stohrer Sax Shop
+  Companion][ssc] for saxophone repair work; spun out here standalone
+  for everyone else.
+- **Just Intonation Drone** — drone playback in any voicing (root /
+  fifth / major / minor triad), live pitch detection, just-intonation
+  interval analysis, and a vintage round Lissajous CRT display. The
+  original [JustATone][jat] Python prototype, preserved here after that
+  project pivoted to a Rust/bevy generative-art garden.
 
 ## Running from source
 

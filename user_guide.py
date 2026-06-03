@@ -16,7 +16,7 @@ GUIDE_DIM = "#7a7060"
 
 
 SECTIONS = [
-    ("Strobe Tuner", [
+    ("Stroboscopic Tuner", [
         "12 spinning wheels, one per chromatic pitch class. When you "
         "play a note, the wheel for that note effectively stands still "
         "— it drifts right if you're sharp, left if you're flat.",
@@ -52,7 +52,7 @@ SECTIONS = [
         "and how flat / sharp you are. Use it for quick check-ins; "
         "use the wheels for the fine work.",
     ]),
-    ("JI Exerciser", [
+    ("Just Intonation Drone", [
         "Plays a drone in any root note. You play along; the meter "
         "shows you the just-intonation interval you're hitting and "
         "how close it is to perfect.",

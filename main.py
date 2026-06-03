@@ -1,8 +1,10 @@
-"""JustATuner — strobe tuner + just-intonation exerciser.
+"""JustATuner — stroboscopic tuner + just-intonation drone.
 
 Standalone Tk app. Two tabs:
-  - Tuner:     12-wheel chromatic strobe tuner (from Stohrer Sax Shop Companion)
-  - Exerciser: drone + pitch detector + Lissajous CRT (from the legacy JustATone)
+  - Stroboscopic Tuner:  12-wheel chromatic strobe-style tuner (from Stohrer
+                         Sax Shop Companion)
+  - Just Intonation Drone: drone + pitch detector + Lissajous CRT (from the
+                           legacy JustATone)
 
 The two engines each own a sounddevice InputStream, and only the
 active tab's engine runs — switching tabs stops one and starts the
@@ -53,12 +55,12 @@ class JustATunerApp:
         # tuner picks up `_skip_theme` / `_dark_canvas` flags via its
         # own widget walker, so no extra theme prep is needed here.
         self.tuner_frame = tk.Frame(self.notebook, bg="#0D0D0D")
-        self.notebook.add(self.tuner_frame, text="Strobe Tuner")
+        self.notebook.add(self.tuner_frame, text="Stroboscopic Tuner")
         self.tuner = TunerView(self.tuner_frame, self.root, self.settings)
 
         # Exerciser tab
         self.exerciser_frame = tk.Frame(self.notebook, bg="#1a1a1a")
-        self.notebook.add(self.exerciser_frame, text="JI Exerciser")
+        self.notebook.add(self.exerciser_frame, text="Just Intonation Drone")
         self.exerciser = ExerciserView(self.exerciser_frame, self.root,
                                        self.settings)
 
@@ -156,9 +158,9 @@ class JustATunerApp:
         messagebox.showinfo(
             f"About {APP_NAME}",
             f"{APP_NAME} v{APP_VERSION}\n\n"
-            f"Strobe tuner + just-intonation exerciser for musicians.\n\n"
+            f"Stroboscopic tuner + just-intonation drone for musicians.\n\n"
             f"Tuner extracted from Stohrer Sax Shop Companion.\n"
-            f"Exerciser is the original JustATone Python prototype.",
+            f"Drone is the original JustATone Python prototype.",
             parent=self.root,
         )
 

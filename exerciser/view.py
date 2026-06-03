@@ -265,7 +265,7 @@ class ExerciserView:
         top.pack_propagate(False)
 
         tk.Label(
-            top, text="JustATuner — JI Exerciser", font=("Helvetica", 13, "bold"),
+            top, text="Just Intonation Drone", font=("Helvetica", 13, "bold"),
             fg=COLOR_GOLD, bg=COLOR_CHASSIS,
         ).pack(side="left", padx=(20, 8), pady=6)
         tk.Label(
