@@ -504,11 +504,22 @@ class TunerView:
         ctrl_frame = tk.Frame(self._tuner_main_frame, bg=ctrl_bg, padx=6, pady=6)
         ctrl_frame._skip_theme = True
         ctrl_frame.pack(fill="x", padx=5, pady=(0, 4))
-        ctrl_frame.columnconfigure(0, weight=0)  # DISP
-        ctrl_frame.columnconfigure(1, weight=0)  # PITCH
-        ctrl_frame.columnconfigure(2, weight=0)  # BIAS
-        ctrl_frame.columnconfigure(3, weight=1)  # center
-        ctrl_frame.columnconfigure(4, weight=1)  # VU
+        # Three equal-weight columns, with `uniform="third"` so each
+        # column stays exactly 1/3 of the panel regardless of how wide
+        # its content is. Left third hosts all three slider groups,
+        # middle third the motor pilot, right third the VU meter.
+        # Children are placed without an `ew` sticky so they hug their
+        # content width and center inside their column.
+        ctrl_frame.columnconfigure(0, weight=1, uniform="third")
+        ctrl_frame.columnconfigure(1, weight=1, uniform="third")
+        ctrl_frame.columnconfigure(2, weight=1, uniform="third")
+
+        # Left third — wraps the three slider groups (DISP / PITCH /
+        # BIAS) in a single frame so they stay together and center as
+        # a unit inside their column.
+        left_third = tk.Frame(ctrl_frame, bg=ctrl_bg)
+        left_third._skip_theme = True
+        left_third.grid(row=0, column=0, sticky="ns")
 
         eq_lbl_font = ("Helvetica", 7)
 
@@ -552,7 +563,7 @@ class TunerView:
             return sliders
 
         # ---- DISP group: SENS, BRIGHT, FPS ----
-        disp_sliders = _make_slider_group(ctrl_frame, 0, _("DISP"), padx=(0, 14))
+        disp_sliders = _make_slider_group(left_third, 0, _("DISP"), padx=(0, 14))
 
         self._tuner_sens_var = tk.IntVar(
             value=tuner_settings.get("sensitivity", 50))
@@ -591,7 +602,7 @@ class TunerView:
         fps_idx_var.trace_add("write", _on_fps_slider)
 
         # ---- PITCH group: A=, KEY ----
-        pitch_sliders = _make_slider_group(ctrl_frame, 1, _("PITCH"), padx=(0, 14))
+        pitch_sliders = _make_slider_group(left_third, 1, _("PITCH"), padx=(0, 14))
 
         self._tuner_pitch_var = tk.DoubleVar(
             value=tuner_settings.get("reference_pitch", 440.0))
@@ -617,7 +628,7 @@ class TunerView:
                       value_fmt=lambda v: TRANSPOSITION_KEYS[int(v)])
 
         # ---- BIAS group: NOTE, OCT. ----
-        bias_sliders = _make_slider_group(ctrl_frame, 2, _("BIAS"))
+        bias_sliders = _make_slider_group(left_third, 2, _("BIAS"))
 
         self._tuner_bias_var = tk.IntVar(value=self._tuner_ring_brightness)
         _make_vslider(bias_sliders, _("NOTE"), self._tuner_bias_var, 0, 100, 0,
@@ -633,9 +644,10 @@ class TunerView:
         self._tuner_waveform_var = tk.StringVar(
             value=tuner_settings.get("waveform", "pure"))
 
+        # Middle third — motor pilot lamp.
         center_frame = tk.Frame(ctrl_frame, bg=ctrl_bg)
         center_frame._skip_theme = True
-        center_frame.grid(row=0, column=3, padx=10, sticky="ns")
+        center_frame.grid(row=0, column=1, padx=10, sticky="ns")
 
         # Use grid inside center_frame so everything shares a single center axis
         center_frame.columnconfigure(0, weight=1)
@@ -700,7 +712,8 @@ class TunerView:
         # ---- RIGHT: VU meter (centered in its column) ----
         vu_frame = tk.Frame(ctrl_frame, bg=ctrl_bg)
         vu_frame._skip_theme = True
-        vu_frame.grid(row=0, column=4, sticky="ns", padx=8)
+        # Right third — VU meter.
+        vu_frame.grid(row=0, column=2, sticky="ns", padx=8)
 
         self._vu_canvas = tk.Canvas(
             vu_frame, width=200, height=120,
