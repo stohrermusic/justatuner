@@ -318,14 +318,32 @@ class ExerciserView:
         row = tk.Frame(parent, bg=COLOR_CHASSIS)
         row.pack(pady=(2, 4))
 
-        self.drone_btn = tk.Button(
-            row, text="▶", font=("Helvetica", 14, "bold"),
+        # DRONE switch — a labeled two-position rocker. Click OFF or ON
+        # to set; the active side lights up amber (off) or red (on) like
+        # a vintage console toggle.
+        switch_frame = tk.Frame(row, bg=COLOR_GROOVE, bd=2, relief="sunken")
+        switch_frame.pack(side="left", padx=8)
+        tk.Label(
+            switch_frame, text="DRONE", font=("Helvetica", 7, "bold"),
+            fg=COLOR_CREAM_DIM, bg=COLOR_GROOVE,
+        ).pack(side="top", pady=(2, 0))
+        positions = tk.Frame(switch_frame, bg=COLOR_GROOVE)
+        positions.pack(side="top", pady=(1, 2), padx=2)
+        self.drone_off_btn = tk.Button(
+            positions, text="OFF", width=4,
+            font=("Helvetica", 9, "bold"),
             relief="flat", bd=0, cursor="hand2",
-            bg="#2e5c30", fg=COLOR_GREEN, width=3, height=1,
-            activebackground="#3a7a3c", activeforeground=COLOR_GREEN,
-            command=self._toggle_drone,
+            command=lambda: self._set_drone(False),
         )
-        self.drone_btn.pack(side="left", padx=8)
+        self.drone_off_btn.pack(side="left", padx=(0, 1))
+        self.drone_on_btn = tk.Button(
+            positions, text="ON", width=4,
+            font=("Helvetica", 9, "bold"),
+            relief="flat", bd=0, cursor="hand2",
+            command=lambda: self._set_drone(True),
+        )
+        self.drone_on_btn.pack(side="left")
+        self._update_drone_switch()
 
         tk.Label(
             row, text="VOL", font=("Helvetica", 7, "bold"),
@@ -498,15 +516,36 @@ class ExerciserView:
         self.transposition = self.trans_var.get()
         self._update_note_buttons()
 
-    def _toggle_drone(self):
-        self.drone_on = not self.drone_on
-        if self.drone_on:
-            self.drone_btn.config(text="■", bg="#5c2e2e", fg=COLOR_RED)
+    def _set_drone(self, on):
+        """Move the DRONE switch to OFF (on=False) or ON (on=True)."""
+        if self.drone_on == on:
+            return
+        self.drone_on = on
+        self._update_drone_switch()
+        self.engine.set_drone(on=on)
+        if on:
             self.drone_status.config(text="Playing", fg=COLOR_GREEN)
         else:
-            self.drone_btn.config(text="▶", bg="#2e5c30", fg=COLOR_GREEN)
             self.drone_status.config(text="Stopped", fg=COLOR_CREAM_DIM)
-        self.engine.set_drone(on=self.drone_on)
+
+    def _update_drone_switch(self):
+        """Sync the OFF/ON button styling to self.drone_on."""
+        if self.drone_on:
+            # ON side lit (red), OFF side dim
+            self.drone_off_btn.config(bg=COLOR_BEZEL, fg=COLOR_CREAM_DIM,
+                                       activebackground=COLOR_BEZEL,
+                                       activeforeground=COLOR_CREAM_DIM)
+            self.drone_on_btn.config(bg="#5c2e2e", fg=COLOR_RED,
+                                      activebackground="#7a3a3a",
+                                      activeforeground=COLOR_RED)
+        else:
+            # OFF side lit (amber), ON side dim
+            self.drone_off_btn.config(bg="#5c4a2e", fg=COLOR_AMBER,
+                                       activebackground="#7a6038",
+                                       activeforeground=COLOR_AMBER)
+            self.drone_on_btn.config(bg=COLOR_BEZEL, fg=COLOR_CREAM_DIM,
+                                      activebackground=COLOR_BEZEL,
+                                      activeforeground=COLOR_CREAM_DIM)
 
     def _on_volume_changed(self, val):
         self.drone_volume = int(val) / 100.0

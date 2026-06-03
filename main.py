@@ -26,6 +26,7 @@ if not hasattr(builtins, "_"):
 from config import APP_NAME, APP_VERSION, load_settings, save_settings  # noqa: E402
 from tuner.view import TunerView  # noqa: E402
 from exerciser.view import ExerciserView  # noqa: E402
+from user_guide import open_user_guide  # noqa: E402
 
 
 class JustATunerApp:
@@ -37,8 +38,11 @@ class JustATunerApp:
 
         self.root = tk.Tk()
         self.root.title(f"{APP_NAME} v{APP_VERSION}")
+        # Fallback geometry — used if maximize fails (e.g. unusual WMs)
+        # and as the size the window restores to when un-maximized.
         self.root.geometry("1100x720")
         self.root.minsize(960, 620)
+        self._maximize_window()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         # Notebook + tabs
@@ -79,6 +83,29 @@ class JustATunerApp:
     def run(self):
         self.root.mainloop()
 
+    def _maximize_window(self):
+        """Open maximized on every platform.
+
+        Windows: `state('zoomed')` is the native maximize.
+        Linux:   `attributes('-zoomed', True)` is the X11/wayland equivalent.
+        macOS:   neither works (Aqua has no programmatic maximize); fall
+                 back to sizing the window to the screen so it covers the
+                 desktop. The user can still drag/resize from there.
+        """
+        try:
+            self.root.state("zoomed")
+            return
+        except tk.TclError:
+            pass
+        try:
+            self.root.attributes("-zoomed", True)
+            return
+        except tk.TclError:
+            pass
+        sw = self.root.winfo_screenwidth()
+        sh = self.root.winfo_screenheight()
+        self.root.geometry(f"{sw}x{sh}+0+0")
+
     # ------------------------------------------------------------------ #
     #  Tab + engine lifecycle
     # ------------------------------------------------------------------ #
@@ -117,6 +144,9 @@ class JustATunerApp:
 
         help_menu = tk.Menu(new_menubar, tearoff=0)
         new_menubar.add_cascade(label="Help", menu=help_menu)
+        help_menu.add_command(label="User Guide",
+                              command=lambda: open_user_guide(self.root))
+        help_menu.add_separator()
         help_menu.add_command(label="About", command=self._show_about)
 
         self.root.config(menu=new_menubar)
