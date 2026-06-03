@@ -86,7 +86,7 @@ SECTIONS = [
         "Transpose: same as the tuner — shifts the note labels to "
         "match your horn's key.",
         "",
-        "Visualizers (Options > Visualizer > Mode): four ways to see "
+        "Visualizers (Options > Visualizer > Mode): five ways to see "
         "what's happening on the round green CRT:",
         "  • Lissajous (default) — interference between your note and "
         "the drone. A stable shape = the ratio is locked. A spinning "
@@ -96,6 +96,12 @@ SECTIONS = [
         "  • Spectrum — FFT bars showing your harmonic balance while "
         "you play against the drone. Watch how clean / airy / "
         "saturated your tone reads.",
+        "  • Waterfall — rolling 3D spectrum. Each FFT frame lands at "
+        "the front and gets pushed back toward a vanishing point as "
+        "the next frame arrives, so what builds up reads as a "
+        "landscape flying past. Colors cycle slowly through the rainbow "
+        "so older mountains carry the hue they were born with. The "
+        "Geiss / MilkDrop waterfall mode in tk.",
         "  • Warp — feedback visualization in the Ryan Geiss / "
         "MilkDrop tradition. Each frame zooms slightly outward and "
         "fades the previous one while painting new audio-reactive "

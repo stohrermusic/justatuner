@@ -6,6 +6,7 @@ builds into any parent Tk frame so it can live alongside the strobe
 tuner inside JustATuner's notebook.
 """
 
+import colorsys
 import random
 import tkinter as tk
 from tkinter import ttk
@@ -91,7 +92,7 @@ class ExerciserView:
         # Visualizer mode + scope display options. The mode dispatches
         # which _draw_* method runs each frame; the color/thickness/etc.
         # settings apply to whichever modes use them.
-        _VALID_MODES = ["Lissajous", "Waveform", "Spectrum"]
+        _VALID_MODES = ["Lissajous", "Waveform", "Spectrum", "Waterfall"]
         if _HAS_PIL:
             _VALID_MODES.append("Warp")
         _saved_mode = ex.get("visualizer_mode", "Lissajous")
@@ -119,6 +120,16 @@ class ExerciserView:
         self._warp_photo = None         # ImageTk.PhotoImage (current frame)
         self._warp_canvas_item = None   # Canvas image item id
         self._warp_t = 0.0              # frame-phase accumulator (for color cycle)
+
+        # Waterfall visualizer state. A rolling stack of FFT frames
+        # drawn with perspective so older frames sit further back —
+        # gives the classic Geiss-style "flying over a mountain
+        # range" effect. Each row stores the magnitudes it was
+        # created with AND the hue at that moment, so the slow color
+        # cycle reads through history.
+        self._waterfall_rows = []       # list of (np.ndarray, color_hex) front→back
+        self._waterfall_lines = []      # persistent canvas line item ids, one per row
+        self._waterfall_hue = 0.0       # 0..1, advances each frame
 
         # Audio engine (created up-front so settings dialogs can list
         # devices, but the input stream isn't started until start()).
@@ -678,6 +689,8 @@ class ExerciserView:
             self._draw_waveform()
         elif mode == "Spectrum":
             self._draw_spectrum()
+        elif mode == "Waterfall":
+            self._draw_waterfall()
         elif mode == "Warp":
             self._draw_warp()
         else:
@@ -700,12 +713,15 @@ class ExerciserView:
             self.scope.delete("trace")
             self.scope.delete("bars")
             self.scope.delete("warp")
+            self.scope.delete("waterfall")
         except Exception:
             pass
         self._spectrum_items = []
         self._warp_buffer = None
         self._warp_photo = None
         self._warp_canvas_item = None
+        self._waterfall_rows = []
+        self._waterfall_lines = []
 
     def _update_analysis(self):
         if not self._running:
@@ -1094,6 +1110,133 @@ class ExerciserView:
             scope.tag_raise("bezel_ring", "warp")
         except Exception:
             pass
+
+    # ------------------------------------------------------------------ #
+    #  Waterfall visualizer — 3D spectrum, flying over a mountain range
+    # ------------------------------------------------------------------ #
+
+    WATERFALL_NUM_ROWS = 50
+    WATERFALL_NUM_BARS = 40
+
+    def _draw_waterfall(self):
+        """Rolling stack of FFT frames drawn with perspective. The
+        newest spectrum lands at the front of the screen; each frame
+        every previous spectrum gets pushed back and shrunk + raised
+        toward a vanishing point. Result reads as a 3D landscape
+        flying past — the Geiss / MilkDrop waterfall-spectrum mode.
+
+        Each row also remembers the hue it was created at, so the
+        slow color cycle reads through the historical depth: front
+        rows are recent colors, back rows are older colors."""
+        scope = self.scope
+        if not scope._bezel_drawn:
+            scope.draw_bezel()
+            scope.draw_graticule()
+        scope.delete("trace")
+        scope.delete("bars")
+
+        cx, cy, r = scope.get_draw_area()
+        N_ROWS = self.WATERFALL_NUM_ROWS
+        N_BARS = self.WATERFALL_NUM_BARS
+
+        # Lazy first-time setup. Pre-fill the row buffer with flat
+        # zero rows so the data structure is always full size, and
+        # create one persistent canvas line per depth slot.
+        if not self._waterfall_lines:
+            for _ in range(N_ROWS):
+                self._waterfall_rows.append((np.zeros(N_BARS), "#000000"))
+            for _ in range(N_ROWS):
+                line_id = scope.create_line(
+                    0, 0, 0, 0, fill="#000000", width=1, tags="waterfall",
+                )
+                self._waterfall_lines.append(line_id)
+
+        # ---- Compute new spectrum ----
+        _ref, mic = self.engine.get_lissajous_data(
+            note_freq(self.root_note, self.octave),
+            num_points=1024,
+        )
+        new_row = np.zeros(N_BARS)
+        if len(mic) >= 64 and np.max(np.abs(mic)) > 0.001:
+            n = len(mic)
+            window = np.hanning(n)
+            spectrum = np.abs(np.fft.rfft(mic * window))
+            freqs = np.fft.rfftfreq(n, 1.0 / self.engine.sr)
+            f_lo, f_hi = 60.0, 4000.0
+            log_edges = np.logspace(np.log10(f_lo), np.log10(f_hi), N_BARS + 1)
+            bar_idx = np.digitize(freqs, log_edges) - 1
+            for i in range(N_BARS):
+                sel = bar_idx == i
+                if np.any(sel):
+                    new_row[i] = spectrum[sel].max()
+            max_mag = new_row.max() if new_row.max() > 0 else 1.0
+            new_row = np.sqrt(new_row / max_mag)
+
+        # ---- Advance hue cycle ----
+        # ~0.4° per frame at 60fps = full color wheel every ~150 frames
+        # (~2.5s). Slow enough to read through the mountain range
+        # rather than strobe.
+        self._waterfall_hue = (self._waterfall_hue + 0.0011) % 1.0
+        new_color = self._hsv_to_hex(self._waterfall_hue, 0.95, 1.0)
+
+        # ---- Push new row, evict oldest ----
+        self._waterfall_rows.insert(0, (new_row, new_color))
+        if len(self._waterfall_rows) > N_ROWS:
+            self._waterfall_rows.pop()
+
+        # ---- Render all rows with perspective ----
+        # Iterate back-to-front so newer rows draw on top of older
+        # ones — gives the correct occlusion for the mountain-range
+        # look.
+        baseline_y = cy + r * 0.55
+        vanish_y = cy - r * 0.55
+        front_half_width = r * 0.92
+        back_half_width = r * 0.18      # the vanishing-line width
+        front_height = r * 0.75         # tallest peak at the front
+        back_height = r * 0.15          # tallest peak at the back
+
+        for depth_from_back in range(N_ROWS):
+            # depth_from_back: 0 = oldest (back), N_ROWS-1 = newest (front)
+            front_depth = N_ROWS - 1 - depth_from_back
+            row_mags, row_color = self._waterfall_rows[front_depth]
+            line_id = self._waterfall_lines[front_depth]
+            z = front_depth / max(1, N_ROWS - 1)  # 0 = newest, 1 = oldest
+
+            # Perspective: as z grows, the row narrows and rises.
+            # A small ease so the front rows feel more pronounced.
+            z_eased = z ** 0.8
+            row_half_width = front_half_width + (back_half_width - front_half_width) * z_eased
+            row_y_base = baseline_y + (vanish_y - baseline_y) * z_eased
+            row_height = front_height + (back_height - front_height) * z_eased
+
+            x_step = (2 * row_half_width) / max(1, N_BARS - 1)
+            coords = []
+            for i, m in enumerate(row_mags):
+                x = cx - row_half_width + i * x_step
+                y = row_y_base - m * row_height
+                coords.append(x)
+                coords.append(y)
+
+            try:
+                scope.coords(line_id, *coords)
+                scope.itemconfigure(line_id, fill=row_color)
+            except tk.TclError:
+                pass
+
+        scope.draw_mask()
+        # Sit the waterfall above the graticule but below the bezel
+        # ring so the round mask still trims the edges.
+        try:
+            scope.tag_raise("waterfall", "graticule")
+            scope.tag_raise("bezel_ring", "waterfall")
+        except Exception:
+            pass
+
+    @staticmethod
+    def _hsv_to_hex(h, s, v):
+        """HSV (0..1 each) → #RRGGBB hex string."""
+        r, g, b = colorsys.hsv_to_rgb(h, s, v)
+        return f"#{int(r * 255):02X}{int(g * 255):02X}{int(b * 255):02X}"
 
     def _draw_interval(self, result, played_freq):
         interval = result["interval"]
