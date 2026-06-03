@@ -1,4 +1,4 @@
-## JustATuner v0.1.0 — first public release
+## JustATuner v0.9.0 — first public release
 
 A free cross-platform desktop tuner for musicians by [Matt Stohrer](https://www.StohrerMusic.com). Two tools in one window: a 12-wheel chromatic stroboscopic tuner for everyday tuning and intonation work, and a just-intonation drone with live interval analysis and a vintage Lissajous CRT for ear training against true ratios.
 
@@ -23,7 +23,7 @@ A free cross-platform desktop tuner for musicians by [Matt Stohrer](https://www.
 - Instrument presets for pitch detection (sax family, voice, brass, strings, etc.)
 
 ### Installs
-- **Windows**: Inno Setup installer (`JustATuner-Windows-Setup-0.1.0.exe`). SmartScreen will warn on first launch — click "More info" → "Run anyway".
+- **Windows**: Inno Setup installer (`JustATuner-Windows-Setup-0.9.0.exe`). SmartScreen will warn on first launch — click "More info" → "Run anyway".
 - **macOS (Apple Silicon only, M1/M2/M3/M4)**: download the `.zip`, drag the .app into Applications, then run `xattr -cr /Applications/JustATuner.app` once in Terminal to clear the quarantine flag (the app isn't code-signed because Apple charges $100/year for that).
   - **No Intel Mac build**: `sounddevice` doesn't bundle PortAudio reliably on Intel macOS, and an audio app where the audio doesn't work isn't worth shipping. Intel Mac users can run from source after `brew install portaudio`.
 - **Linux**: download the binary, `chmod +x`, run. Needs `sudo apt install libportaudio2` first (or your distro's equivalent).
