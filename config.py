@@ -48,6 +48,7 @@ DEFAULT_SETTINGS = {
         "drone_volume": 0.3,
         "show_et_diff": True,
         "instrument": "Auto",
+        "visualizer_mode": "Lissajous",
         "scope_color": "Green",
         "scope_trails": 1,
         "scope_thickness": 2,

@@ -86,12 +86,21 @@ SECTIONS = [
         "Transpose: same as the tuner — shifts the note labels to "
         "match your horn's key.",
         "",
-        "Lissajous: the round green CRT shows the interference "
-        "between your note and the drone. A stable shape means the "
-        "ratio is locked. A spinning shape means you're close but "
-        "not exact. A blur means you're far off. Once you've heard "
-        "what a locked unison or octave looks like, your eye picks "
-        "up the rest quickly.",
+        "Visualizers (Options > Visualizer > Mode): four ways to see "
+        "what's happening on the round green CRT:",
+        "  • Lissajous (default) — interference between your note and "
+        "the drone. A stable shape = the ratio is locked. A spinning "
+        "shape = close but not exact. A blur = far off.",
+        "  • Waveform — classic oscilloscope, mic input across the "
+        "screen. Reads pitch stability and tone color at a glance.",
+        "  • Phase Wheel — a single striped wheel that rotates at a "
+        "rate proportional to how far you are from the just-intonation "
+        "interval. Wheel stops = locked. Same principle as the "
+        "tuner's wheels, but referenced to JI instead of equal "
+        "temperament.",
+        "  • Spectrum — FFT bars showing your harmonic balance while "
+        "you play against the drone. Watch how clean / airy / "
+        "saturated your tone reads.",
         "",
         "Show ET Difference: when on, the meter shows how far the "
         "just-intonation interval sits from equal temperament. Useful "

@@ -82,11 +82,27 @@ class ExerciserView:
         self.instrument = tk.StringVar(value=ex.get("instrument", "Auto"))
         self.input_device = tk.StringVar(value="Default")
 
-        # Scope display options
+        # Visualizer mode + scope display options. The mode dispatches
+        # which _draw_* method runs each frame; the color/thickness/etc.
+        # settings apply to whichever modes use them (Lissajous uses
+        # everything; Waveform uses color + thickness; Phase Wheel uses
+        # color; Spectrum uses color).
+        self.visualizer_mode = tk.StringVar(value=ex.get("visualizer_mode", "Lissajous"))
         self.scope_color = tk.StringVar(value=ex.get("scope_color", "Green"))
         self.scope_trails = tk.IntVar(value=int(ex.get("scope_trails", 1)))
         self.scope_thickness = tk.IntVar(value=int(ex.get("scope_thickness", 2)))
         self.scope_points = tk.IntVar(value=int(ex.get("scope_points", 300)))
+
+        # Phase-wheel state. Accumulates rotation between frames so the
+        # wheel reads as continuously rotating proportional to your cents-
+        # off-from-JI, the same way a strobe tuner wheel drifts.
+        self._phase_wheel_angle = 0.0
+        self._phase_wheel_last_t = None
+        # Latest cents-off-from-JI value, refreshed by _update_analysis.
+        # None when there's no recent pitch detection (mic silent, or
+        # confidence too low). Drives _draw_phase_wheel between analysis
+        # ticks (which run at ~12 fps while scope draws at ~60 fps).
+        self._latest_cents_off = None
 
         # Audio engine (created up-front so settings dialogs can list
         # devices, but the input stream isn't started until start()).
@@ -158,6 +174,7 @@ class ExerciserView:
             "drone_volume": self.drone_volume,
             "show_et_diff": bool(self.show_et_diff.get()),
             "instrument": self.instrument.get(),
+            "visualizer_mode": self.visualizer_mode.get(),
             "scope_color": self.scope_color.get(),
             "scope_trails": int(self.scope_trails.get()),
             "scope_thickness": int(self.scope_thickness.get()),
@@ -219,32 +236,40 @@ class ExerciserView:
             label="Refresh Devices", command=self._refresh_device_menu,
         )
 
-        scope_menu = tk.Menu(options_menu, tearoff=0)
-        options_menu.add_cascade(label="Scope Display", menu=scope_menu)
+        viz_menu = tk.Menu(options_menu, tearoff=0)
+        options_menu.add_cascade(label="Visualizer", menu=viz_menu)
 
-        color_menu = tk.Menu(scope_menu, tearoff=0)
-        scope_menu.add_cascade(label="Phosphor Color", menu=color_menu)
+        mode_menu = tk.Menu(viz_menu, tearoff=0)
+        viz_menu.add_cascade(label="Mode", menu=mode_menu)
+        for mode_name in ("Lissajous", "Waveform", "Phase Wheel", "Spectrum"):
+            mode_menu.add_radiobutton(
+                label=mode_name, variable=self.visualizer_mode, value=mode_name,
+                command=self._on_visualizer_mode_changed,
+            )
+
+        color_menu = tk.Menu(viz_menu, tearoff=0)
+        viz_menu.add_cascade(label="Phosphor Color", menu=color_menu)
         for color_name in PHOSPHOR_COLORS:
             color_menu.add_radiobutton(
                 label=color_name, variable=self.scope_color, value=color_name,
             )
 
-        thick_menu = tk.Menu(scope_menu, tearoff=0)
-        scope_menu.add_cascade(label="Trace Thickness", menu=thick_menu)
+        thick_menu = tk.Menu(viz_menu, tearoff=0)
+        viz_menu.add_cascade(label="Trace Thickness", menu=thick_menu)
         for w in [1, 2, 3, 4]:
             thick_menu.add_radiobutton(
                 label=f"{w}px", variable=self.scope_thickness, value=w,
             )
 
-        trail_menu = tk.Menu(scope_menu, tearoff=0)
-        scope_menu.add_cascade(label="Trails", menu=trail_menu)
+        trail_menu = tk.Menu(viz_menu, tearoff=0)
+        viz_menu.add_cascade(label="Lissajous Trails", menu=trail_menu)
         for t, label in [(0, "None"), (1, "1 trail"), (2, "2 trails"), (3, "3 trails")]:
             trail_menu.add_radiobutton(
                 label=label, variable=self.scope_trails, value=t,
             )
 
-        res_menu = tk.Menu(scope_menu, tearoff=0)
-        scope_menu.add_cascade(label="Resolution", menu=res_menu)
+        res_menu = tk.Menu(viz_menu, tearoff=0)
+        viz_menu.add_cascade(label="Resolution", menu=res_menu)
         for pts, label in [(150, "Low"), (300, "Medium"), (500, "High"), (800, "Ultra")]:
             res_menu.add_radiobutton(
                 label=label, variable=self.scope_points, value=pts,
@@ -300,10 +325,13 @@ class ExerciserView:
         frame = tk.Frame(parent, bg=COLOR_CHASSIS)
         frame.pack(expand=True, pady=(5, 2))
 
-        tk.Label(
-            frame, text="LISSAJOUS", font=("Helvetica", 8, "bold"),
+        # Label is dynamic — reflects the active visualizer mode.
+        self.scope_mode_label = tk.Label(
+            frame, text=self.visualizer_mode.get().upper(),
+            font=("Helvetica", 8, "bold"),
             fg=COLOR_CREAM_DIM, bg=COLOR_CHASSIS,
-        ).pack(pady=(0, 2))
+        )
+        self.scope_mode_label.pack(pady=(0, 2))
 
         self.scope = RoundScope(frame, size=380, bg=COLOR_CHASSIS)
         self.scope.pack()
@@ -629,8 +657,36 @@ class ExerciserView:
         if not self._running:
             return
         root_freq = note_freq(self.root_note, self.octave)
-        self._draw_lissajous(root_freq)
+        mode = self.visualizer_mode.get()
+        if mode == "Waveform":
+            self._draw_waveform()
+        elif mode == "Phase Wheel":
+            self._draw_phase_wheel()
+        elif mode == "Spectrum":
+            self._draw_spectrum()
+        else:
+            self._draw_lissajous(root_freq)
         self._scope_after_id = self.root.after(SCOPE_MS, self._update_scope)
+
+    def _on_visualizer_mode_changed(self):
+        """Reset per-mode state and refresh the mode label when the user
+        picks a different visualizer."""
+        mode = self.visualizer_mode.get()
+        try:
+            self.scope_mode_label.config(text=mode.upper())
+        except Exception:
+            pass
+        # Drop any in-flight Lissajous trail history and phase-wheel
+        # accumulator so the new mode starts from a clean canvas.
+        self._liss_history = []
+        self._phase_wheel_angle = 0.0
+        self._phase_wheel_last_t = None
+        try:
+            self.scope.delete("trace")
+            self.scope.delete("wheel")
+            self.scope.delete("bars")
+        except Exception:
+            pass
 
     def _update_analysis(self):
         if not self._running:
@@ -641,10 +697,13 @@ class ExerciserView:
         if freq is not None and confidence > 0.2:
             result = analyze_interval(freq, root_freq)
             if result:
+                self._latest_cents_off = result["cents_off"]
                 self._draw_interval(result, freq)
             else:
+                self._latest_cents_off = None
                 self._draw_idle()
         else:
+            self._latest_cents_off = None
             self._draw_idle()
 
         self._analysis_after_id = self.root.after(ANALYSIS_MS, self._update_analysis)
@@ -717,6 +776,224 @@ class ExerciserView:
         self._liss_history.insert(0, pts)
         if len(self._liss_history) > 3:
             self._liss_history = self._liss_history[:3]
+
+        scope.draw_mask()
+
+    # ------------------------------------------------------------------ #
+    #  Waveform visualizer — mic input vs. time
+    # ------------------------------------------------------------------ #
+
+    def _draw_waveform(self):
+        """Horizontal oscilloscope: mic amplitude across the screen, time
+        left → right. Reads pitch stability and tone color at a glance."""
+        import time as _time
+        scope = self.scope
+        if not scope._bezel_drawn:
+            scope.draw_bezel()
+            scope.draw_graticule()
+        scope.delete("trace")
+
+        cx, cy, r = scope.get_draw_area()
+        # Use mic samples from the engine. get_lissajous_data returns
+        # (ref, mic) — we just need mic for the waveform.
+        max_pts = self.scope_points.get()
+        _ref, mic = self.engine.get_lissajous_data(
+            note_freq(self.root_note, self.octave),
+            num_points=max_pts * 4,
+        )
+        mic_max = np.max(np.abs(mic))
+        if mic_max > 0.001:
+            mic = mic / mic_max
+        else:
+            mic = np.zeros_like(mic)
+
+        n = len(mic)
+        step = max(1, n // max_pts)
+        mic = mic[::step]
+        n = len(mic)
+
+        # Map samples to canvas: x evenly across [cx-r, cx+r], y centered
+        # around cy with amplitude scaled to ~70% of the radius so peaks
+        # don't graze the bezel.
+        xs = np.linspace(cx - r * 0.92, cx + r * 0.92, n)
+        ys = cy - mic * (r * 0.7)
+        points = np.empty(n * 2)
+        points[0::2] = xs
+        points[1::2] = ys
+        pts = points.tolist()
+
+        phosphor_bright, phosphor_mid, _phosphor_dim = self._get_phosphor()
+        thickness = self.scope_thickness.get()
+
+        # Subtle center line so silence reads as a flat line, not nothing.
+        scope.create_line(
+            cx - r * 0.92, cy, cx + r * 0.92, cy,
+            fill=phosphor_mid, width=1, tags="trace",
+        )
+        if len(pts) > 4:
+            scope.create_line(
+                *pts, fill=phosphor_bright, width=thickness, tags="trace",
+            )
+        scope.draw_mask()
+
+    # ------------------------------------------------------------------ #
+    #  Phase Wheel visualizer — drift rate ∝ cents-off-from-JI
+    # ------------------------------------------------------------------ #
+
+    def _draw_phase_wheel(self):
+        """Single striped wheel, rotates left/right at a rate proportional
+        to how far the played note sits from the nearest JI interval.
+        Locked = wheel stands still. Same principle as a strobe tuner
+        wheel but referenced to just intonation instead of equal
+        temperament."""
+        import time as _time
+        scope = self.scope
+        if not scope._bezel_drawn:
+            scope.draw_bezel()
+            scope.draw_graticule()
+        scope.delete("trace")
+        scope.delete("wheel")
+
+        cx, cy, r = scope.get_draw_area()
+        wheel_r = r * 0.78
+
+        # Accumulate rotation. cents_off scales to degrees/sec at a rate
+        # that feels lively but not vertigo-inducing: ~6 deg/sec per cent.
+        # 1 cent off ≈ one wheel division/sec drift, like a vintage strobe.
+        now = _time.monotonic()
+        cents = self._latest_cents_off
+        if self._phase_wheel_last_t is not None and cents is not None:
+            dt = now - self._phase_wheel_last_t
+            self._phase_wheel_angle += cents * 6.0 * dt
+            self._phase_wheel_angle %= 360.0
+        self._phase_wheel_last_t = now
+
+        phosphor_bright, phosphor_mid, phosphor_dim = self._get_phosphor()
+
+        # Draw a 12-stripe wheel — same divisions as the tuner's wheels.
+        # When the wheel "stops" the stripes hold their phase relative
+        # to the rendering grid, which the eye reads as a freeze.
+        num_stripes = 12
+        stripe_deg = 360.0 / num_stripes
+        for i in range(num_stripes):
+            a0 = (self._phase_wheel_angle + i * stripe_deg) * np.pi / 180.0
+            a1 = (self._phase_wheel_angle + (i + 0.5) * stripe_deg) * np.pi / 180.0
+            # Wedge from center to edge — use a polygon with three points
+            # (center + two arc endpoints). Cheap and reads well.
+            x0 = cx + wheel_r * np.cos(a0)
+            y0 = cy + wheel_r * np.sin(a0)
+            x1 = cx + wheel_r * np.cos(a1)
+            y1 = cy + wheel_r * np.sin(a1)
+            scope.create_polygon(
+                cx, cy, x0, y0, x1, y1,
+                fill=phosphor_bright, outline="", tags="wheel",
+            )
+
+        # Faint rim to anchor the eye on the wheel boundary.
+        scope.create_oval(
+            cx - wheel_r, cy - wheel_r, cx + wheel_r, cy + wheel_r,
+            outline=phosphor_dim, width=1, tags="wheel",
+        )
+
+        # Status dot at the center — green when within ~5¢ of JI.
+        lock_color = (
+            phosphor_bright if cents is not None and abs(cents) <= LOCK_THRESHOLD
+            else phosphor_mid
+        )
+        scope.create_oval(
+            cx - 4, cy - 4, cx + 4, cy + 4,
+            fill=lock_color, outline="", tags="wheel",
+        )
+
+        scope.draw_mask()
+
+    # ------------------------------------------------------------------ #
+    #  Spectrum visualizer — FFT bars of mic input
+    # ------------------------------------------------------------------ #
+
+    def _draw_spectrum(self):
+        """FFT magnitude bars over a log frequency axis. Shows harmonic
+        balance while you play against the drone — clean tone vs.
+        airy / overtone-rich vs. saturated all read distinctly."""
+        scope = self.scope
+        if not scope._bezel_drawn:
+            scope.draw_bezel()
+            scope.draw_graticule()
+        scope.delete("trace")
+        scope.delete("bars")
+
+        cx, cy, r = scope.get_draw_area()
+
+        # Pull a chunk of mic data via the engine helper.
+        _ref, mic = self.engine.get_lissajous_data(
+            note_freq(self.root_note, self.octave),
+            num_points=2048,
+        )
+        if len(mic) < 64 or np.max(np.abs(mic)) < 0.001:
+            # Silence — draw a flat baseline so the panel doesn't go blank.
+            scope.create_line(
+                cx - r * 0.9, cy + r * 0.5, cx + r * 0.9, cy + r * 0.5,
+                fill=self._get_phosphor()[1], width=1, tags="bars",
+            )
+            scope.draw_mask()
+            return
+
+        # FFT magnitude. Apply a Hann window first so leakage doesn't
+        # smear single tones into adjacent bins.
+        n = len(mic)
+        window = np.hanning(n)
+        spectrum = np.abs(np.fft.rfft(mic * window))
+        freqs = np.fft.rfftfreq(n, 1.0 / self.engine.sr)
+
+        # Log frequency axis from 60 Hz to 4 kHz — wide enough for any
+        # sax / wind / vocal fundamental + a few harmonics, tight enough
+        # to give each bar visible width.
+        f_lo, f_hi = 60.0, 4000.0
+        mask = (freqs >= f_lo) & (freqs <= f_hi)
+        if not np.any(mask):
+            scope.draw_mask()
+            return
+        bin_freqs = freqs[mask]
+        bin_mags = spectrum[mask]
+
+        # Bucket into N log-spaced bars.
+        num_bars = 48
+        log_edges = np.logspace(np.log10(f_lo), np.log10(f_hi), num_bars + 1)
+        bar_mags = np.zeros(num_bars)
+        for i in range(num_bars):
+            band = (bin_freqs >= log_edges[i]) & (bin_freqs < log_edges[i + 1])
+            if np.any(band):
+                bar_mags[i] = bin_mags[band].max()
+
+        # Normalize and apply a soft sqrt curve so quiet partials are
+        # visible without the fundamental pinning the top.
+        max_mag = bar_mags.max() if bar_mags.max() > 0 else 1.0
+        bar_mags = np.sqrt(bar_mags / max_mag)
+
+        phosphor_bright, phosphor_mid, _phosphor_dim = self._get_phosphor()
+
+        # Draw bars across a horizontal band ~80% of the diameter wide,
+        # rooted at a baseline ~60% down from center.
+        band_left = cx - r * 0.85
+        band_right = cx + r * 0.85
+        baseline = cy + r * 0.55
+        max_height = r * 1.05
+        bar_w = (band_right - band_left) / num_bars
+        for i, m in enumerate(bar_mags):
+            x0 = band_left + i * bar_w + 1
+            x1 = band_left + (i + 1) * bar_w - 1
+            y1 = baseline
+            y0 = baseline - m * max_height
+            # Mid color for the bar fill, bright color for the cap line,
+            # so peaks stand out.
+            scope.create_rectangle(
+                x0, y0, x1, y1,
+                fill=phosphor_mid, outline="", tags="bars",
+            )
+            scope.create_line(
+                x0, y0, x1, y0,
+                fill=phosphor_bright, width=1, tags="bars",
+            )
 
         scope.draw_mask()
 
