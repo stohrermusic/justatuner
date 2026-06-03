@@ -651,18 +651,44 @@ class TunerView:
         tk.Label(indicator_frame, text=_(" \u2190 flat"), bg=ctrl_bg, fg="#888888",
                  font=("Helvetica", 10)).pack(side="left", padx=(0, 6))
 
-        pilot_cv = tk.Canvas(indicator_frame, width=30, height=30,
+        # Motor pilot — vintage tube-amp pilot lamp. Five concentric
+        # ovals + a small specular highlight stack to fake a radial
+        # gradient: the eye reads the warm halo as light bloom around
+        # a glowing filament. Colors land on the incandescent black-
+        # body curve from a deep ember red far out, through amber, up
+        # to a near-white core.
+        pilot_cv = tk.Canvas(indicator_frame, width=46, height=46,
                              bg=ctrl_bg, highlightthickness=0, bd=0)
         pilot_cv._skip_theme = True
         pilot_cv.pack(side="left")
         self._tuner_pilot_canvas = pilot_cv
-        pcx, pcy, pr = 15, 15, 8
-        self._tuner_pilot_glow = pilot_cv.create_oval(
-            pcx - pr - 4, pcy - pr - 4, pcx + pr + 4, pcy + pr + 4,
-            fill="#1A0A00", outline="", width=0)
-        self._tuner_pilot_id = pilot_cv.create_oval(
-            pcx - pr, pcy - pr, pcx + pr, pcy + pr,
-            fill="#331100", outline="#444444", width=1)
+        pcx, pcy = 23, 23
+        # Layered from outermost (largest, dimmest) to inner core.
+        # Each layer is an oval; stacking them mimics a radial gradient.
+        self._tuner_pilot_layers = []
+        for r in (20, 16, 12, 8, 5):
+            oid = pilot_cv.create_oval(
+                pcx - r, pcy - r, pcx + r, pcy + r,
+                fill="#1A0A00", outline="", width=0,
+            )
+            self._tuner_pilot_layers.append(oid)
+        # Specular hotspot offset up-and-left, like a real bulb. Small
+        # and subtle — barely there on the OFF state, brightens on ON.
+        self._tuner_pilot_specular = pilot_cv.create_oval(
+            pcx - 4, pcy - 5, pcx - 1, pcy - 2,
+            fill="#1A0A00", outline="", width=0,
+        )
+        # Outermost faint ring suggesting a recessed bezel rim.
+        pilot_cv.create_oval(
+            pcx - 21, pcy - 21, pcx + 21, pcy + 21,
+            fill="", outline="#2a2a2a", width=1,
+        )
+        # Compatibility shims for code paths that still reference the
+        # original two-ID variables (e.g. tests). The fill swap in
+        # _tuner_set_pilot uses _tuner_pilot_layers, so these aliases
+        # are read-only.
+        self._tuner_pilot_glow = self._tuner_pilot_layers[0]
+        self._tuner_pilot_id = self._tuner_pilot_layers[-1]
 
         tk.Label(indicator_frame, text=_("sharp \u2192"), bg=ctrl_bg, fg="#888888",
                  font=("Helvetica", 10)).pack(side="left", padx=(6, 0))
@@ -1006,17 +1032,29 @@ class TunerView:
         self._vu_arc_start = arc_start
         self._vu_arc_end = arc_end
 
+    # Layered pilot-light palettes — outer to inner. ON is a warm
+    # incandescent glow (deep ember red far out, through amber, into a
+    # near-white core); OFF is the same shape held at "cold filament"
+    # values so the lamp still reads as present but obviously unlit.
+    _PILOT_ON_COLORS = ("#2a1408", "#5a280c", "#a4541a", "#ff9b3c", "#ffe7b3")
+    _PILOT_OFF_COLORS = ("#1a0a04", "#1f0d05", "#241007", "#2c1408", "#3a1c0e")
+    _PILOT_SPECULAR_ON = "#fff5d8"
+    _PILOT_SPECULAR_OFF = "#3a1c0e"
+
     def _tuner_set_pilot(self, active):
-        """Set motor pilot glow state (orange when engine is running)."""
-        if not hasattr(self, '_tuner_pilot_id'):
+        """Glow the motor-pilot lamp. ON is warm and incandescent; OFF
+        keeps the same five-layer shape at filament-cold values so the
+        lamp still reads as a lamp."""
+        if not hasattr(self, '_tuner_pilot_layers'):
             return
         canvas = self._tuner_pilot_canvas
-        if active:
-            canvas.itemconfigure(self._tuner_pilot_id, fill="#FF8800")
-            canvas.itemconfigure(self._tuner_pilot_glow, fill="#442200")
-        else:
-            canvas.itemconfigure(self._tuner_pilot_id, fill="#331100")
-            canvas.itemconfigure(self._tuner_pilot_glow, fill="#1A0A00")
+        palette = self._PILOT_ON_COLORS if active else self._PILOT_OFF_COLORS
+        for oid, color in zip(self._tuner_pilot_layers, palette):
+            canvas.itemconfigure(oid, fill=color)
+        canvas.itemconfigure(
+            self._tuner_pilot_specular,
+            fill=self._PILOT_SPECULAR_ON if active else self._PILOT_SPECULAR_OFF,
+        )
 
     def _vu_update(self, result):
         """Update the analog VU meter with detected pitch."""
