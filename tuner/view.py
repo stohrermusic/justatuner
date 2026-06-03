@@ -644,10 +644,13 @@ class TunerView:
         self._tuner_waveform_var = tk.StringVar(
             value=tuner_settings.get("waveform", "pure"))
 
-        # Middle third — motor pilot lamp.
+        # Middle third — motor pilot lamp. No sticky so the frame
+        # shrinks to its natural ~70px height and floats centered
+        # vertically in the row (which is driven taller by the sliders
+        # on the left and the VU meter on the right).
         center_frame = tk.Frame(ctrl_frame, bg=ctrl_bg)
         center_frame._skip_theme = True
-        center_frame.grid(row=0, column=1, padx=10, sticky="ns")
+        center_frame.grid(row=0, column=1, padx=10)
 
         # Use grid inside center_frame so everything shares a single center axis
         center_frame.columnconfigure(0, weight=1)
