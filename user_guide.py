@@ -86,7 +86,7 @@ SECTIONS = [
         "Transpose: same as the tuner — shifts the note labels to "
         "match your horn's key.",
         "",
-        "Visualizers (Options > Visualizer > Mode): three ways to see "
+        "Visualizers (Options > Visualizer > Mode): four ways to see "
         "what's happening on the round green CRT:",
         "  • Lissajous (default) — interference between your note and "
         "the drone. A stable shape = the ratio is locked. A spinning "
@@ -96,6 +96,12 @@ SECTIONS = [
         "  • Spectrum — FFT bars showing your harmonic balance while "
         "you play against the drone. Watch how clean / airy / "
         "saturated your tone reads.",
+        "  • Warp — feedback visualization in the Ryan Geiss / "
+        "MilkDrop tradition. Each frame zooms slightly outward and "
+        "fades the previous one while painting new audio-reactive "
+        "shapes on top, so what you see is a recursive blooming "
+        "pattern that pulses with your playing. Not analytical — "
+        "just a hypnotic backdrop for long practice sessions.",
         "",
         "Show ET Difference: when on, the meter shows how far the "
         "just-intonation interval sits from equal temperament. Useful "

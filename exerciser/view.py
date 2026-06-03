@@ -12,6 +12,12 @@ from tkinter import ttk
 
 import numpy as np
 
+try:
+    from PIL import Image, ImageDraw, ImageTk
+    _HAS_PIL = True
+except ImportError:
+    _HAS_PIL = False
+
 from exerciser.intervals import (
     NOTE_NAMES, TRANSPOSITIONS,
     note_freq, analyze_interval, transpose_note_name, freq_to_note_name,
@@ -85,12 +91,15 @@ class ExerciserView:
         # Visualizer mode + scope display options. The mode dispatches
         # which _draw_* method runs each frame; the color/thickness/etc.
         # settings apply to whichever modes use them.
-        _VALID_MODES = ("Lissajous", "Waveform", "Spectrum")
+        _VALID_MODES = ["Lissajous", "Waveform", "Spectrum"]
+        if _HAS_PIL:
+            _VALID_MODES.append("Warp")
         _saved_mode = ex.get("visualizer_mode", "Lissajous")
         if _saved_mode not in _VALID_MODES:
             # Migrate retired modes (e.g. "Phase Wheel") to the default.
             _saved_mode = "Lissajous"
         self.visualizer_mode = tk.StringVar(value=_saved_mode)
+        self._available_modes = tuple(_VALID_MODES)
         self.scope_color = tk.StringVar(value=ex.get("scope_color", "Green"))
         self.scope_trails = tk.IntVar(value=int(ex.get("scope_trails", 1)))
         self.scope_thickness = tk.IntVar(value=int(ex.get("scope_thickness", 2)))
@@ -100,6 +109,16 @@ class ExerciserView:
         # lazily on first draw and updated via .coords() each frame —
         # tk hates delete+recreate of many items per frame.
         self._spectrum_items = []
+
+        # Warp visualizer state. Lazily allocated on first draw. The
+        # warp uses a numpy framebuffer that each frame is zoomed
+        # slightly outward + brightness-decayed, with new audio-
+        # driven content painted on top — Ryan Geiss / MilkDrop style.
+        self._warp_buffer = None        # numpy uint8 array, shape (N,N,3)
+        self._warp_size = 220           # framebuffer side length in pixels
+        self._warp_photo = None         # ImageTk.PhotoImage (current frame)
+        self._warp_canvas_item = None   # Canvas image item id
+        self._warp_t = 0.0              # frame-phase accumulator (for color cycle)
 
         # Audio engine (created up-front so settings dialogs can list
         # devices, but the input stream isn't started until start()).
@@ -238,7 +257,7 @@ class ExerciserView:
 
         mode_menu = tk.Menu(viz_menu, tearoff=0)
         viz_menu.add_cascade(label="Mode", menu=mode_menu)
-        for mode_name in ("Lissajous", "Waveform", "Spectrum"):
+        for mode_name in self._available_modes:
             mode_menu.add_radiobutton(
                 label=mode_name, variable=self.visualizer_mode, value=mode_name,
                 command=self._on_visualizer_mode_changed,
@@ -659,6 +678,8 @@ class ExerciserView:
             self._draw_waveform()
         elif mode == "Spectrum":
             self._draw_spectrum()
+        elif mode == "Warp":
+            self._draw_warp()
         else:
             self._draw_lissajous(root_freq)
         self._scope_after_id = self.root.after(SCOPE_MS, self._update_scope)
@@ -671,16 +692,20 @@ class ExerciserView:
             self.scope_mode_label.config(text=mode.upper())
         except Exception:
             pass
-        # Drop any in-flight Lissajous trail history; nuke the cached
-        # spectrum items so the next Spectrum draw recreates them at
-        # the right canvas dimensions.
+        # Drop any in-flight Lissajous trail history; nuke cached
+        # canvas items for the other modes so the next draw recreates
+        # them clean.
         self._liss_history = []
         try:
             self.scope.delete("trace")
             self.scope.delete("bars")
+            self.scope.delete("warp")
         except Exception:
             pass
         self._spectrum_items = []
+        self._warp_buffer = None
+        self._warp_photo = None
+        self._warp_canvas_item = None
 
     def _update_analysis(self):
         if not self._running:
@@ -937,6 +962,138 @@ class ExerciserView:
             scope.coords(cap_id, x0, y0, x1, y0)
 
         scope.draw_mask()
+
+    # ------------------------------------------------------------------ #
+    #  Warp visualizer — Geiss-style feedback / MilkDrop vibes
+    # ------------------------------------------------------------------ #
+
+    def _draw_warp(self):
+        """Frame-to-frame feedback warp. Each frame the previous frame
+        is zoomed slightly outward + brightness-decayed, then new
+        audio-driven content is painted on top. The result is a
+        recursive, hypnotic visualization that responds to amplitude
+        + pitch + harmonic content. Ryan Geiss / MilkDrop vibes,
+        without the GPU shader stack."""
+        if not _HAS_PIL:
+            return
+
+        scope = self.scope
+        if not scope._bezel_drawn:
+            scope.draw_bezel()
+            scope.draw_graticule()
+        scope.delete("trace")
+        scope.delete("bars")
+
+        cx, cy, r = scope.get_draw_area()
+        N = self._warp_size
+        center = N // 2
+
+        # ---- Lazy framebuffer setup ----
+        if self._warp_buffer is None:
+            self._warp_buffer = np.zeros((N, N, 3), dtype=np.uint8)
+
+        # ---- Pull a chunk of audio for this frame's reactivity ----
+        _ref, mic = self.engine.get_lissajous_data(
+            note_freq(self.root_note, self.octave),
+            num_points=1024,
+        )
+        if len(mic) == 0:
+            mic = np.zeros(64, dtype=np.float32)
+        amp = float(np.sqrt(np.mean(mic * mic))) if len(mic) else 0.0
+        peak = float(np.max(np.abs(mic))) if len(mic) else 0.0
+
+        # ---- Feedback step: zoom prev frame slightly outward + decay ----
+        # PIL's resize is C-implemented and very fast. We resize the
+        # buffer up by a few pixels then crop back to N×N, which makes
+        # everything march outward from the center — the classic
+        # feedback "tunnel" effect. Decay multiplier dims the previous
+        # frame so old content gradually fades rather than persisting
+        # forever.
+        prev = Image.fromarray(self._warp_buffer, mode="RGB")
+        zoom_px = max(3, int(3 + amp * 12))
+        zoomed = prev.resize((N + zoom_px, N + zoom_px), Image.BILINEAR)
+        off = zoom_px // 2
+        prev = zoomed.crop((off, off, off + N, off + N))
+        # Decay: multiply the array. 0.94 leaves a smooth trail; lower
+        # makes it fade quicker. The np path is faster than ImageEnhance.
+        arr = np.asarray(prev, dtype=np.uint16)
+        arr = (arr * 240) >> 8   # ≈ ×0.9375, integer-only, fast
+        arr = arr.astype(np.uint8)
+
+        # ---- Paint new audio-driven content ----
+        img = Image.fromarray(arr, mode="RGB")
+        draw = ImageDraw.Draw(img)
+
+        phosphor_bright, phosphor_mid, _phosphor_dim = self._get_phosphor()
+        # Convert hex -> RGB tuple once per frame.
+        def _hex_to_rgb(h):
+            h = h.lstrip('#')
+            return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
+        bright_rgb = _hex_to_rgb(phosphor_bright)
+        mid_rgb = _hex_to_rgb(phosphor_mid)
+
+        # Advance phase. The visible spirograph-ish pattern is driven
+        # by self._warp_t scaling against the detected pitch and audio
+        # phase. Slower advance = slower rotation.
+        self._warp_t += 0.06 + amp * 0.4
+
+        # Radius modulated by amplitude — louder = larger figures.
+        base_r = N * 0.18 + amp * N * 0.35
+        # Number of audio "petals" drawn this frame. Always at least
+        # a few so silence still has a faint pulse; scales up with
+        # signal strength.
+        n_petals = 6 + int(peak * 30)
+
+        for i in range(n_petals):
+            phase = self._warp_t + i * (2 * np.pi / n_petals)
+            # Outer point
+            x = center + base_r * np.cos(phase)
+            y = center + base_r * np.sin(phase)
+            # Sub-point swept by a faster phase — creates the
+            # interweaving spirograph look.
+            sub_phase = self._warp_t * 1.7 + i * 0.5
+            x2 = center + base_r * 0.55 * np.cos(sub_phase)
+            y2 = center + base_r * 0.55 * np.sin(sub_phase)
+            # Line between them. Bright fill on top of the decayed
+            # backdrop blooms over successive frames as the warp
+            # smears it outward.
+            draw.line([(x, y), (x2, y2)], fill=bright_rgb, width=2)
+            # Single dot at the outer point for accent.
+            draw.ellipse([x - 2, y - 2, x + 2, y + 2], fill=bright_rgb)
+
+        # Center pulse — a soft fill that catches amplitude beats.
+        pulse_r = 3 + amp * 12
+        draw.ellipse(
+            [center - pulse_r, center - pulse_r,
+             center + pulse_r, center + pulse_r],
+            fill=mid_rgb,
+        )
+
+        # ---- Store back to buffer + push to canvas ----
+        self._warp_buffer = np.asarray(img, dtype=np.uint8)
+
+        # Resize to the scope's inner draw area. NEAREST keeps it
+        # cheap; the warp's natural softness hides the blockiness.
+        display_size = int(r * 2 * 0.95)
+        display_img = img.resize((display_size, display_size), Image.BILINEAR)
+        self._warp_photo = ImageTk.PhotoImage(display_img)
+        if self._warp_canvas_item is None:
+            self._warp_canvas_item = scope.create_image(
+                cx, cy, image=self._warp_photo, tags="warp",
+            )
+        else:
+            scope.itemconfigure(self._warp_canvas_item, image=self._warp_photo)
+            scope.coords(self._warp_canvas_item, cx, cy)
+
+        scope.draw_mask()
+        # Make sure the warp image sits beneath the bezel ring (which
+        # draw_mask raises) but above the graticule so the audio
+        # content isn't fighting with the grid.
+        try:
+            scope.tag_raise("warp", "graticule")
+            scope.tag_raise("bezel_ring", "warp")
+        except Exception:
+            pass
 
     def _draw_interval(self, result, played_freq):
         interval = result["interval"]
