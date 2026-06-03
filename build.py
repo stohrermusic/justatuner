@@ -37,13 +37,25 @@ def main():
 
     # PyInstaller picks up tuner/, exerciser/, audio_utils.py, and config.py
     # via the main.py import graph; no --add-data needed for the source.
+    #
+    # Per-platform flags:
+    #   Windows / Linux: --onefile produces a single binary, --noconsole
+    #                    suppresses the terminal window for the GUI app.
+    #   macOS:           --windowed produces a .app bundle (the standard
+    #                    distributable on Mac). --onefile here would
+    #                    flatten it to a single binary that wouldn't run
+    #                    as a regular Mac app.
     cmd = [
         sys.executable, "-m", "PyInstaller",
         "--name", APP_NAME,
-        "--noconsole",
-        "--onefile" if sys.platform != "darwin" else "--windowed",
-        "main.py",
+        "--noconfirm",
     ]
+    if sys.platform == "darwin":
+        cmd.append("--windowed")
+    else:
+        cmd.extend(["--onefile", "--noconsole"])
+    cmd.append("main.py")
+
     print(" ".join(cmd))
     subprocess.check_call(cmd)
 
