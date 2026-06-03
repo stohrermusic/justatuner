@@ -37,8 +37,7 @@ A drone synthesizer with live just-intonation interval analysis. Set a root, fli
 - Show ET Difference toggle — see how far each JI interval sits from equal temperament
 - Transposition support (Concert, B♭, E♭, F) so written-pitch instruments see their own note names
 - Instrument presets for pitch detection (sax family, voice, brass, strings, etc.)
-- Drone-cancellation notch filter on the input so the mic hears YOU, not your own drone bleed
-- Headphones strongly recommended when the drone is on (open speakers feed the drone back into the mic and confuse the pitch detector)
+- Spectral notch filter on the mic input at every drone oscillator frequency — knocks down direct bleed so the pitch detector can lock onto you instead of the drone. It helps but it's not magic: room reflections, the drone's higher harmonics, and any speaker feedback at slightly-shifted frequencies still get through. **Headphones strongly recommended when the drone is on** — open speakers feed the drone back into the mic in ways the notch can't fully cancel.
 
 ### General
 - Two tabs, one window — only the active tab uses the microphone, so the OS never sees two opens on your mic
