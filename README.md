@@ -66,6 +66,8 @@ You only need to do this once. After install, the Start Menu / Desktop shortcut 
 
 ### macOS
 
+**Apple Silicon only** (M1 / M2 / M3 / M4). The macOS build ships as an arm64 binary. There's no Intel Mac build because the `sounddevice` Python package (which talks to the OS audio system) doesn't bundle PortAudio reliably on Intel macOS, and an audio app where the audio doesn't work isn't worth shipping. Intel Mac users can still run JustATuner from source after `brew install portaudio` — see "From Source" below.
+
 Apple charges developers $100 a year to sign apps, which I am not paying for a free giveaway. macOS will block the unsigned app on first launch with either an **"unidentified developer"** warning or a **"JustATuner.app is damaged and can't be opened"** error. To unblock it:
 
 1. Double-click the downloaded `JustATuner-macOS.zip` to unzip it.
