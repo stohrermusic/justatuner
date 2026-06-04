@@ -151,6 +151,7 @@ class ExerciserView:
         self._garden_next_plant_x = 30.0 # x to seed the next plant at
         self._garden_audio_env = 0.0     # smoothed RMS for branching triggers
         self._garden_last_branch_frame = -999
+        self._garden_circle_mask = None  # PIL "L"-mode mask sized to display
 
         # Audio engine (created up-front so settings dialogs can list
         # devices, but the input stream isn't started until start()).
@@ -846,6 +847,7 @@ class ExerciserView:
         self._garden_next_plant_x = 30.0
         self._garden_audio_env = 0.0
         self._garden_last_branch_frame = -999
+        self._garden_circle_mask = None
 
     def _update_analysis(self):
         if not self._running:
@@ -1216,7 +1218,12 @@ class ExerciserView:
         # cheap; the warp's natural softness hides the blockiness.
         display_size = int(r * 2 * 0.95)
         display_img = img.resize((display_size, display_size), Image.BILINEAR)
-        self._warp_photo = ImageTk.PhotoImage(display_img)
+        # Round off the corners with a circular alpha mask so the
+        # square image doesn't protrude past the CRT bezel.
+        mask = self._get_garden_circle_mask(display_size)
+        rgba = display_img.convert("RGBA")
+        rgba.putalpha(mask)
+        self._warp_photo = ImageTk.PhotoImage(rgba)
         if self._warp_canvas_item is None:
             self._warp_canvas_item = scope.create_image(
                 cx, cy, image=self._warp_photo, tags="warp",
@@ -1378,6 +1385,9 @@ class ExerciserView:
     GARDEN_GOLDEN_ANGLE = 137.5077640500378 * (np.pi / 180.0)  # radians
     GARDEN_BRANCH_FAN = 28 * (np.pi / 180.0)  # ± angle of children from parent
     GARDEN_HUE_PER_FRAME = 0.00045      # slow rainbow cycle for the ribbon
+    GARDEN_LEAF_INTERVAL = 22           # avg frames between leaf drops on a branch
+    GARDEN_LEAF_MIN_DEPTH = 1           # main stem doesn't get leaves; sub-branches do
+    GARDEN_FLOWER_PETALS = 7            # petals per bloom (Fibonacci-ish)
 
     def _draw_garden(self):
         """Draw the audio-driven branching garden.
@@ -1486,11 +1496,21 @@ class ExerciserView:
                 self._garden_scroll_left(int(N * 0.4))
 
         # ---- Push the buffer to the scope canvas ----
+        # Resize the square framebuffer to the scope's inner draw area,
+        # then mask it to a circle so the corners don't poke past the
+        # bezel ring. The mask is cached by size since the scope area
+        # doesn't change between frames.
         display_size = int(r * 2 * 0.95)
         display_img = self._garden_buffer.resize(
             (display_size, display_size), Image.BILINEAR,
         )
-        self._garden_photo = ImageTk.PhotoImage(display_img)
+        mask = self._get_garden_circle_mask(display_size)
+        # Compose onto a black RGBA so the masked-out corners are
+        # transparent — the dark CRT screen underneath will show
+        # through them.
+        rgba = display_img.convert("RGBA")
+        rgba.putalpha(mask)
+        self._garden_photo = ImageTk.PhotoImage(rgba)
         if self._garden_canvas_item is None:
             self._garden_canvas_item = scope.create_image(
                 cx, cy, image=self._garden_photo, tags="garden",
@@ -1507,6 +1527,19 @@ class ExerciserView:
             pass
 
     GARDEN_NUM_BARS = 18
+
+    def _get_garden_circle_mask(self, size):
+        """Return a PIL 'L'-mode circular alpha mask sized `size×size`,
+        cached so we don't rebuild it every frame."""
+        if (self._garden_circle_mask is not None
+                and self._garden_circle_mask.size == (size, size)):
+            return self._garden_circle_mask
+        mask = Image.new("L", (size, size), 0)
+        ImageDraw.Draw(mask).ellipse(
+            [0, 0, size - 1, size - 1], fill=255,
+        )
+        self._garden_circle_mask = mask
+        return mask
 
     def _garden_spectrum(self, mic):
         """Return (bars, centroid_hz). Bars are log-bucketed FFT mags,
@@ -1557,6 +1590,8 @@ class ExerciserView:
                 "age": 0,
                 "alive": True,
                 "rotation_index": 0,   # for golden-angle phyllotaxis
+                "leaf_cooldown": self.GARDEN_LEAF_INTERVAL,
+                "leaf_side": 1,        # alternates ±1 each drop
             }],
         }
         self._garden_plants.append(plant)
@@ -1572,6 +1607,12 @@ class ExerciserView:
         # Aging + dominance check
         branch["age"] += 1
         if branch["age"] >= branch["life"]:
+            # Reached natural end of life — bloom a flower at the tip
+            # before dying. Tips that get killed by going off-canvas or
+            # by being branched away don't flower; only natural deaths
+            # do, so flowers visually mark the ends of branches that
+            # got to grow to maturity.
+            self._garden_draw_flower(branch, draw, hue)
             branch["alive"] = False
             return
 
@@ -1642,6 +1683,104 @@ class ExerciserView:
         )
         self._garden_set_pixel(branch["x"], branch["y"], stem_color)
 
+        # Leaf drops — only for sub-branches (depth ≥ 1), so the main
+        # stem stays clean. Cooldown decrements each frame and a leaf
+        # is drawn on alternating sides when it hits zero.
+        if branch["depth"] >= self.GARDEN_LEAF_MIN_DEPTH:
+            branch["leaf_cooldown"] -= 1
+            if branch["leaf_cooldown"] <= 0:
+                self._garden_draw_leaf(branch, draw, hue)
+                # Add a touch of jitter so leaves don't land at exact
+                # multiples of the interval. ±25% of nominal.
+                jitter = random.randint(-self.GARDEN_LEAF_INTERVAL // 4,
+                                         self.GARDEN_LEAF_INTERVAL // 4)
+                branch["leaf_cooldown"] = self.GARDEN_LEAF_INTERVAL + jitter
+                branch["leaf_side"] *= -1
+
+    def _garden_draw_leaf(self, branch, draw, hue):
+        """Paint a small teardrop-shaped leaf attached to the branch at
+        its current print-head position, on the alternating side.
+
+        Leaf orientation is roughly perpendicular to the branch
+        direction, with the apex pointing slightly forward (toward the
+        growth direction) so it looks like it's catching light. Size
+        scales with branch width."""
+        L = max(4.0, branch["width"] * 0.85)        # leaf length
+        W = max(2.5, L * 0.55)                       # leaf max width
+        # Perpendicular to branch, on the assigned side.
+        perp_x = -np.sin(branch["angle"]) * branch["leaf_side"]
+        perp_y = np.cos(branch["angle"]) * branch["leaf_side"]
+        # Forward direction (along branch) — used to tilt the apex.
+        fwd_x = np.cos(branch["angle"])
+        fwd_y = np.sin(branch["angle"])
+        # Base attaches at branch; tip extends outward + slightly forward.
+        bx, by = branch["x"], branch["y"]
+        tip_x = bx + perp_x * L + fwd_x * (L * 0.25)
+        tip_y = by + perp_y * L + fwd_y * (L * 0.25)
+        # Two side points define the teardrop's widest cross-section
+        # at ~40% from the base.
+        side_along_x = perp_x * (W * 0.5)
+        side_along_y = perp_y * (W * 0.5)
+        mid_x = bx + perp_x * (L * 0.4) + fwd_x * (L * 0.08)
+        mid_y = by + perp_y * (L * 0.4) + fwd_y * (L * 0.08)
+        # Polygon: base — mid+fwd-perp — tip — mid-fwd-perp — base.
+        # The perpendicular split here creates the teardrop's pointed
+        # tip and bulbous middle.
+        leaf_perp_x = -np.sin(branch["angle"])
+        leaf_perp_y = np.cos(branch["angle"])
+        spread_x = leaf_perp_x * (W * 0.5)
+        spread_y = leaf_perp_y * (W * 0.5)
+        pts = [
+            (bx, by),
+            (mid_x + spread_x, mid_y + spread_y),
+            (tip_x, tip_y),
+            (mid_x - spread_x, mid_y - spread_y),
+        ]
+        # Color: green-leaning hue. Take the current hue and pull it
+        # toward green by averaging with 0.33 (green in HSV space).
+        leaf_hue = (hue * 0.4 + 0.33 * 0.6) % 1.0
+        r_, g_, b_ = colorsys.hsv_to_rgb(leaf_hue, 0.75, 0.85)
+        fill = (int(r_ * 255), int(g_ * 255), int(b_ * 255))
+        # PIL.ImageDraw.polygon doesn't honor max-blend, so it'll
+        # overwrite — for leaves that's fine, they sit on top of the
+        # background ribbon.
+        try:
+            draw.polygon(pts, fill=fill, outline=fill)
+        except Exception:
+            pass
+
+    def _garden_draw_flower(self, branch, draw, hue):
+        """Paint a small radial bloom at the branch tip. Petals are
+        ellipses arranged around the center at golden-angle offsets,
+        with a contrasting center disc."""
+        cx_, cy_ = branch["x"], branch["y"]
+        # Flower size scales with parent branch width.
+        flower_r = max(4.0, branch["width"] * 0.9)
+        petal_r = flower_r * 0.42
+        # Petal hue = current hue (full saturation); center is a warmer
+        # complementary color (hue + 0.5) for visual contrast.
+        r_, g_, b_ = colorsys.hsv_to_rgb(hue, 0.85, 0.95)
+        petal_color = (int(r_ * 255), int(g_ * 255), int(b_ * 255))
+        rc, gc, bc = colorsys.hsv_to_rgb((hue + 0.5) % 1.0, 0.85, 0.95)
+        center_color = (int(rc * 255), int(gc * 255), int(bc * 255))
+        try:
+            for i in range(self.GARDEN_FLOWER_PETALS):
+                angle = i * (2 * np.pi / self.GARDEN_FLOWER_PETALS)
+                px = cx_ + np.cos(angle) * (flower_r - petal_r)
+                py = cy_ + np.sin(angle) * (flower_r - petal_r)
+                draw.ellipse(
+                    [px - petal_r, py - petal_r, px + petal_r, py + petal_r],
+                    fill=petal_color, outline=petal_color,
+                )
+            # Center disc
+            cr = petal_r * 0.7
+            draw.ellipse(
+                [cx_ - cr, cy_ - cr, cx_ + cr, cy_ + cr],
+                fill=center_color, outline=center_color,
+            )
+        except Exception:
+            pass
+
     def _garden_set_pixel(self, x, y, color):
         """Max-blend a pixel into the garden buffer. Out-of-bounds is
         silently ignored."""
@@ -1692,6 +1831,8 @@ class ExerciserView:
                 "age": 0,
                 "alive": True,
                 "rotation_index": parent["rotation_index"] + 1,
+                "leaf_cooldown": self.GARDEN_LEAF_INTERVAL,
+                "leaf_side": 1,
             }
             children.append(child)
         # The parent stops growing — its children carry the apex forward.
