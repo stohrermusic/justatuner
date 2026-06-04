@@ -1387,7 +1387,12 @@ class ExerciserView:
     GARDEN_HUE_PER_FRAME = 0.00045      # slow rainbow cycle for the ribbon
     GARDEN_LEAF_INTERVAL = 22           # avg frames between leaf drops on a branch
     GARDEN_LEAF_MIN_DEPTH = 1           # main stem doesn't get leaves; sub-branches do
-    GARDEN_FLOWER_PETALS = 7            # petals per bloom (Fibonacci-ish)
+    # Flower shape vocabulary — each plant picks one species-style at
+    # spawn time, so every flower on the plant matches and the garden
+    # reads as a mix of species rather than a parade of identical
+    # blooms.
+    GARDEN_PETAL_SHAPES = ("round", "teardrop", "ray", "spade")
+    GARDEN_PETAL_COUNTS = (3, 5, 5, 6, 7, 8, 9, 13)  # Fibonacci-weighted
 
     def _draw_garden(self):
         """Draw the audio-driven branching garden.
@@ -1466,7 +1471,7 @@ class ExerciserView:
                 continue
             self._garden_step_branch(
                 branch, draw, spectrum_bars, drift,
-                self._garden_audio_env, hue_now,
+                self._garden_audio_env, hue_now, plant,
             )
             if branch["alive"]:
                 any_alive = True
@@ -1578,8 +1583,22 @@ class ExerciserView:
         N = self._garden_size
         x = self._garden_next_plant_x
         y = N - 8.0   # rooted near the bottom
+        # Per-plant flower style — fixed for the lifetime of the plant
+        # so all blooms on a single stem match like a real species.
+        flower_style = {
+            "n_petals": random.choice(self.GARDEN_PETAL_COUNTS),
+            "shape": random.choice(self.GARDEN_PETAL_SHAPES),
+            "petal_aspect": random.uniform(0.7, 1.8),     # outer-radial vs side width
+            "center_ratio": random.uniform(0.25, 0.65),   # center disc / flower radius
+            "petal_overlap": random.uniform(0.9, 1.25),   # >1 = petals overlap their neighbors
+            "size_scale": random.uniform(0.85, 1.3),      # overall scale relative to branch width
+            "center_hue_offset": random.choice([0.5, 0.5, 0.33, 0.17]),  # mostly complementary
+            "petal_rotation": random.uniform(0.0, np.pi), # starting angle so flowers point varied directions
+            "secondary_bloom_rate": random.choice([0.0, 0.0, 0.0008, 0.0015]),
+        }
         plant = {
             "frames_alive": 0,
+            "flower_style": flower_style,
             "branches": [{
                 "x": x, "y": y,
                 "angle": -np.pi / 2,    # straight up
@@ -1602,7 +1621,7 @@ class ExerciserView:
         self._garden_next_plant_x += 40.0
 
     def _garden_step_branch(self, branch, draw, spectrum_bars, drift,
-                            audio_env, hue):
+                            audio_env, hue, plant):
         """Advance one branch by one frame, stamping its rib."""
         # Aging + dominance check
         branch["age"] += 1
@@ -1612,7 +1631,7 @@ class ExerciserView:
             # by being branched away don't flower; only natural deaths
             # do, so flowers visually mark the ends of branches that
             # got to grow to maturity.
-            self._garden_draw_flower(branch, draw, hue)
+            self._garden_draw_flower(branch, draw, hue, plant["flower_style"])
             branch["alive"] = False
             return
 
@@ -1697,6 +1716,18 @@ class ExerciserView:
                 branch["leaf_cooldown"] = self.GARDEN_LEAF_INTERVAL + jitter
                 branch["leaf_side"] *= -1
 
+        # Secondary blooms — some plant species sprout extra flowers
+        # along their branches mid-life, not just at the terminal tip.
+        # The chance is set per-plant in flower_style and is zero for
+        # most species (so terminal-only blooms remain the norm).
+        sec_rate = plant["flower_style"].get("secondary_bloom_rate", 0.0)
+        if (sec_rate > 0
+                and branch["depth"] >= 1
+                and branch["age"] > 12
+                and random.random() < sec_rate):
+            self._garden_draw_flower(branch, draw, hue, plant["flower_style"],
+                                     scale=0.6)
+
     def _garden_draw_leaf(self, branch, draw, hue):
         """Paint a small teardrop-shaped leaf attached to the branch at
         its current print-head position, on the alternating side.
@@ -1749,37 +1780,133 @@ class ExerciserView:
         except Exception:
             pass
 
-    def _garden_draw_flower(self, branch, draw, hue):
-        """Paint a small radial bloom at the branch tip. Petals are
-        ellipses arranged around the center at golden-angle offsets,
-        with a contrasting center disc."""
+    def _garden_draw_flower(self, branch, draw, hue, style, scale=1.0):
+        """Paint a bloom at the branch's current position using the
+        plant's species-style (petal count, shape, aspect, center).
+
+        `scale` lets the caller draw smaller secondary blooms along
+        a branch's length without changing the species look.
+        """
         cx_, cy_ = branch["x"], branch["y"]
-        # Flower size scales with parent branch width.
-        flower_r = max(4.0, branch["width"] * 0.9)
-        petal_r = flower_r * 0.42
-        # Petal hue = current hue (full saturation); center is a warmer
-        # complementary color (hue + 0.5) for visual contrast.
+        # Flower size scales with branch width AND the plant's
+        # size_scale modifier AND the optional secondary-bloom scale.
+        flower_r = max(4.0, branch["width"] * 0.9
+                       * style.get("size_scale", 1.0)
+                       * scale)
+        n_petals = max(3, int(style.get("n_petals", 6)))
+        shape = style.get("shape", "round")
+        aspect = style.get("petal_aspect", 1.0)
+        center_ratio = style.get("center_ratio", 0.4)
+        overlap = style.get("petal_overlap", 1.0)
+        rotation = style.get("petal_rotation", 0.0)
+        center_hue_off = style.get("center_hue_offset", 0.5)
+
+        # Petal sizing: outer "length" of each petal vs side "width".
+        center_r = flower_r * center_ratio
+        petal_len = (flower_r - center_r) * overlap
+        # Side width sized so a "round" shape with aspect=1 reproduces
+        # roughly the previous look.
+        petal_w = petal_len / max(0.4, aspect)
+
+        # Colors
         r_, g_, b_ = colorsys.hsv_to_rgb(hue, 0.85, 0.95)
         petal_color = (int(r_ * 255), int(g_ * 255), int(b_ * 255))
-        rc, gc, bc = colorsys.hsv_to_rgb((hue + 0.5) % 1.0, 0.85, 0.95)
+        rc, gc, bc = colorsys.hsv_to_rgb(
+            (hue + center_hue_off) % 1.0, 0.85, 0.95,
+        )
         center_color = (int(rc * 255), int(gc * 255), int(bc * 255))
+
         try:
-            for i in range(self.GARDEN_FLOWER_PETALS):
-                angle = i * (2 * np.pi / self.GARDEN_FLOWER_PETALS)
-                px = cx_ + np.cos(angle) * (flower_r - petal_r)
-                py = cy_ + np.sin(angle) * (flower_r - petal_r)
-                draw.ellipse(
-                    [px - petal_r, py - petal_r, px + petal_r, py + petal_r],
-                    fill=petal_color, outline=petal_color,
-                )
-            # Center disc
-            cr = petal_r * 0.7
+            for i in range(n_petals):
+                a = rotation + i * (2 * np.pi / n_petals)
+                # Petal midpoint sits between center and the outer
+                # circumference so the visible shape spans both sides.
+                mid_dist = center_r + petal_len * 0.5
+                px = cx_ + np.cos(a) * mid_dist
+                py = cy_ + np.sin(a) * mid_dist
+                self._draw_petal(draw, px, py, a, petal_len, petal_w,
+                                  shape, petal_color, cx_, cy_, center_r)
+            # Center disc on top of all petals
             draw.ellipse(
-                [cx_ - cr, cy_ - cr, cx_ + cr, cy_ + cr],
+                [cx_ - center_r, cy_ - center_r,
+                 cx_ + center_r, cy_ + center_r],
                 fill=center_color, outline=center_color,
             )
         except Exception:
             pass
+
+    def _draw_petal(self, draw, mid_x, mid_y, angle, length, width,
+                    shape, color, center_x, center_y, center_r):
+        """Paint a single petal centered at (mid_x, mid_y), pointing
+        radially outward at `angle`. Different shapes produce visibly
+        different plants."""
+        # Unit vectors along the radial direction and perpendicular.
+        rx, ry = np.cos(angle), np.sin(angle)
+        px, py = -ry, rx
+
+        # Inner anchor (closer to flower center) and outer tip.
+        inner_x = center_x + rx * center_r
+        inner_y = center_y + ry * center_r
+        outer_x = center_x + rx * (center_r + length)
+        outer_y = center_y + ry * (center_r + length)
+        half_w = width * 0.5
+
+        if shape == "round":
+            # Bounding-box ellipse oriented radially. PIL's ellipse is
+            # axis-aligned, so for non-trivial rotations we approximate
+            # with a quad polygon — the radial direction is the long
+            # axis, perpendicular is the short axis.
+            pts = [
+                (inner_x + px * half_w * 0.6, inner_y + py * half_w * 0.6),
+                (outer_x + px * half_w * 0.5, outer_y + py * half_w * 0.5),
+                (outer_x - px * half_w * 0.5, outer_y - py * half_w * 0.5),
+                (inner_x - px * half_w * 0.6, inner_y - py * half_w * 0.6),
+            ]
+            draw.polygon(pts, fill=color, outline=color)
+            # A little bulge at the tip — overdraws a small ellipse
+            # axis-aligned, which reads as rounded since petals are
+            # small.
+            draw.ellipse(
+                [outer_x - half_w * 0.5, outer_y - half_w * 0.5,
+                 outer_x + half_w * 0.5, outer_y + half_w * 0.5],
+                fill=color, outline=color,
+            )
+        elif shape == "teardrop":
+            # Pointed at the OUTER end, wide at the inner end — opposite
+            # of the leaf orientation.
+            mid_along_x = center_x + rx * (center_r + length * 0.4)
+            mid_along_y = center_y + ry * (center_r + length * 0.4)
+            pts = [
+                (inner_x + px * half_w, inner_y + py * half_w),
+                (mid_along_x + px * half_w * 1.05, mid_along_y + py * half_w * 1.05),
+                (outer_x, outer_y),
+                (mid_along_x - px * half_w * 1.05, mid_along_y - py * half_w * 1.05),
+                (inner_x - px * half_w, inner_y - py * half_w),
+            ]
+            draw.polygon(pts, fill=color, outline=color)
+        elif shape == "ray":
+            # Thin elongated rays — daisy / sunflower vibe.
+            thin = half_w * 0.45
+            pts = [
+                (inner_x + px * thin, inner_y + py * thin),
+                (outer_x + px * thin, outer_y + py * thin),
+                (outer_x - px * thin, outer_y - py * thin),
+                (inner_x - px * thin, inner_y - py * thin),
+            ]
+            draw.polygon(pts, fill=color, outline=color)
+        elif shape == "spade":
+            # Wider near the tip, narrow at the base — points outward
+            # like a tulip / spade outline.
+            mid_x_ = center_x + rx * (center_r + length * 0.65)
+            mid_y_ = center_y + ry * (center_r + length * 0.65)
+            pts = [
+                (inner_x + px * half_w * 0.45, inner_y + py * half_w * 0.45),
+                (mid_x_ + px * half_w * 1.15, mid_y_ + py * half_w * 1.15),
+                (outer_x, outer_y),
+                (mid_x_ - px * half_w * 1.15, mid_y_ - py * half_w * 1.15),
+                (inner_x - px * half_w * 0.45, inner_y - py * half_w * 0.45),
+            ]
+            draw.polygon(pts, fill=color, outline=color)
 
     def _garden_set_pixel(self, x, y, color):
         """Max-blend a pixel into the garden buffer. Out-of-bounds is
