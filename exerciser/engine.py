@@ -483,25 +483,80 @@ class AudioEngine:
             return (self._drone_sample_label, self._drone_sample_freq)
 
     def _install_sample(self, sample, sr, label):
-        """Detect pitch + swap in a new drone sample. Holds the sample
-        lock only briefly so the audio callback isn't blocked."""
-        # Take a window from the middle of the recording — avoids any
-        # attack transients at the very start or release at the end.
+        """Process raw audio into a loopable drone sample, detect its
+        pitch, and swap it in. Holds the sample lock only briefly so
+        the audio callback isn't blocked.
+
+        Three steps shape the loaded audio into something that loops
+        as cleanly as a real produced sample would:
+
+        1. Trim the attack and release — drop ~200ms from each end so
+           the looping region is steady-state. Skipped when the source
+           is too short to spare it.
+        2. Run YIN on the trimmed middle to find the fundamental
+           frequency. Used both for the playback-rate math AND for
+           sizing the crossfade.
+        3. Equal-power crossfade between the tail and the head — the
+           last N samples become ``tail * cos(πi/2N) + head * sin(πi/2N)``,
+           so when the playback head wraps from index L-1 back to 0
+           the transition is seamless. Crossfade length is 4 periods
+           of the fundamental, capped at 150 ms or 25% of the sample
+           length, with a 64-sample floor.
+
+        Result is a sample that loops without the audible click a
+        plain mod-wrap would produce on most instrument tones.
+        """
+        sample = sample.astype(np.float32, copy=True)
+        N_raw = len(sample)
+
+        # ---- 1. Trim attack + release ----
+        # Cut up to 200 ms from each end, but never more than 10% of
+        # total length — short recordings would lose their meat.
+        trim = min(int(0.2 * sr), N_raw // 10)
+        if N_raw > 2 * trim + int(0.3 * sr):
+            sample = sample[trim : N_raw - trim]
+
+        # ---- 2. Pitch detection on the trimmed middle ----
         N = len(sample)
         mid_start = max(0, N // 2 - sr)        # 1s before midpoint
         mid_end = min(N, N // 2 + sr)          # 1s after
         window = sample[mid_start:mid_end] if mid_end > mid_start else sample
         freq, conf = yin_detect(
-            window.astype(np.float32), sr,
+            window, sr,
             fmin=55, fmax=2000, threshold=0.30,
         )
         if freq is None or conf < 0.15:
             # Couldn't detect a pitch — fall back to A4 so we still play
             # *something*, and let the UI surface the ambiguity.
             freq = 440.0
+            conf = conf or 0.0
+
+        # ---- 3. Equal-power crossfade at the loop boundary ----
+        # 4 periods of fundamental is enough for the ear to read the
+        # boundary as a smooth fade-through, not a butt-splice.
+        period_samples = int(sr / freq) if freq > 0 else int(sr * 0.01)
+        crossfade_len = min(
+            4 * period_samples,
+            int(0.15 * sr),     # 150 ms cap
+            N // 4,             # don't fade more than 25% of the sample
+        )
+        crossfade_len = max(crossfade_len, 64)  # floor
+
+        if N > 2 * crossfade_len and crossfade_len >= 16:
+            head = sample[:crossfade_len].copy()
+            tail_idx = N - crossfade_len
+            tail = sample[tail_idx:].copy()
+            # Equal-power (constant-RMS) curves: tail rolls off as
+            # cos, head fades in as sin, so their squared sum is
+            # 1.0 everywhere — no energy dip across the crossfade.
+            i = np.arange(crossfade_len, dtype=np.float32)
+            t = i / max(1, crossfade_len - 1)
+            tail_w = np.cos(t * np.pi / 2)
+            head_w = np.sin(t * np.pi / 2)
+            sample[tail_idx:] = (tail * tail_w + head * head_w).astype(np.float32)
 
         with self._sample_lock:
-            self._drone_sample = sample.astype(np.float32)
+            self._drone_sample = sample
             self._drone_sample_sr = sr
             self._drone_sample_freq = float(freq)
             self._drone_sample_label = label
@@ -517,7 +572,7 @@ class AudioEngine:
         return {
             "sr": sr,
             "freq_hz": float(freq),
-            "duration_s": N / sr,
+            "duration_s": len(sample) / sr,
             "label": label,
             "pitch_confident": conf >= 0.15,
         }
