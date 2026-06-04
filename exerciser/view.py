@@ -95,6 +95,7 @@ class ExerciserView:
         _VALID_MODES = ["Lissajous", "Waveform", "Spectrum", "Waterfall"]
         if _HAS_PIL:
             _VALID_MODES.append("Warp")
+            _VALID_MODES.append("Garden")
         _saved_mode = ex.get("visualizer_mode", "Lissajous")
         if _saved_mode not in _VALID_MODES:
             # Migrate retired modes (e.g. "Phase Wheel") to the default.
@@ -130,6 +131,26 @@ class ExerciserView:
         self._waterfall_rows = []       # list of (np.ndarray, color_hex) front→back
         self._waterfall_lines = []      # persistent canvas line item ids, one per row
         self._waterfall_hue = 0.0       # 0..1, advances each frame
+
+        # Garden visualizer state. A print-head ribbon model: each
+        # frame, every alive branch stamps the current FFT cross-
+        # section perpendicular to its growth direction onto a
+        # persistent PIL framebuffer. Branches split on amplitude
+        # peaks (L-system style) using golden-angle phyllotaxis and
+        # apical dominance (depth-based width/speed decay). When the
+        # current plant matures (all branches dead), a new plant
+        # spawns to the right; once the canvas fills with plants,
+        # the buffer scrolls left treadmill-style.
+        self._garden_buffer = None       # PIL Image, the persistent canvas
+        self._garden_canvas_item = None  # tk canvas image item id
+        self._garden_photo = None        # ImageTk.PhotoImage (kept alive)
+        self._garden_plants = []         # list of plant dicts (see _draw_garden)
+        self._garden_hue = 0.18          # 0..1, slowly advances
+        self._garden_centroid_smooth = 1000.0
+        self._garden_size = 280          # framebuffer side length in pixels
+        self._garden_next_plant_x = 30.0 # x to seed the next plant at
+        self._garden_audio_env = 0.0     # smoothed RMS for branching triggers
+        self._garden_last_branch_frame = -999
 
         # Audio engine (created up-front so settings dialogs can list
         # devices, but the input stream isn't started until start()).
@@ -786,6 +807,8 @@ class ExerciserView:
             self._draw_waterfall()
         elif mode == "Warp":
             self._draw_warp()
+        elif mode == "Garden":
+            self._draw_garden()
         else:
             self._draw_lissajous(root_freq)
         self._scope_after_id = self.root.after(SCOPE_MS, self._update_scope)
@@ -807,6 +830,7 @@ class ExerciserView:
             self.scope.delete("bars")
             self.scope.delete("warp")
             self.scope.delete("waterfall")
+            self.scope.delete("garden")
         except Exception:
             pass
         self._spectrum_items = []
@@ -815,6 +839,13 @@ class ExerciserView:
         self._warp_canvas_item = None
         self._waterfall_rows = []
         self._waterfall_lines = []
+        self._garden_buffer = None
+        self._garden_canvas_item = None
+        self._garden_photo = None
+        self._garden_plants = []
+        self._garden_next_plant_x = 30.0
+        self._garden_audio_env = 0.0
+        self._garden_last_branch_frame = -999
 
     def _update_analysis(self):
         if not self._running:
@@ -1330,6 +1361,362 @@ class ExerciserView:
         """HSV (0..1 each) → #RRGGBB hex string."""
         r, g, b = colorsys.hsv_to_rgb(h, s, v)
         return f"#{int(r * 255):02X}{int(g * 255):02X}{int(b * 255):02X}"
+
+    # ------------------------------------------------------------------ #
+    #  Garden visualizer — branching audio-driven plants
+    # ------------------------------------------------------------------ #
+
+    # Tuning constants. Lifted out so the values are easy to tweak when
+    # we see how the plants actually grow in real playing.
+    GARDEN_PLANT_BASE_SPEED = 0.45      # pixels/frame for a fresh main stem
+    GARDEN_PLANT_BASE_WIDTH = 22.0      # rib extent (pixels) for a main stem
+    GARDEN_PLANT_BASE_LIFE = 400        # frames a main stem can live
+    GARDEN_DEPTH_DECAY_SPEED = 0.78     # each generation = this × parent's speed
+    GARDEN_DEPTH_DECAY_WIDTH = 0.62     # each generation = this × parent's width
+    GARDEN_DEPTH_DECAY_LIFE = 0.55      # each generation = this × parent's life
+    GARDEN_MAX_DEPTH = 4                # generations before a tip stops branching
+    GARDEN_GOLDEN_ANGLE = 137.5077640500378 * (np.pi / 180.0)  # radians
+    GARDEN_BRANCH_FAN = 28 * (np.pi / 180.0)  # ± angle of children from parent
+    GARDEN_HUE_PER_FRAME = 0.00045      # slow rainbow cycle for the ribbon
+
+    def _draw_garden(self):
+        """Draw the audio-driven branching garden.
+
+        Each plant is a tree of "branches"; each branch carries a print
+        head that advances one step per frame and stamps the current FFT
+        cross-section perpendicular to its growth direction. Branches
+        split into 2 children on amplitude peaks, with child width /
+        speed / life decayed (apical dominance) and rotated relative to
+        the parent by ±GARDEN_BRANCH_FAN around a golden-angle-rotated
+        axis (phyllotaxis). When all branches in a plant have died, a
+        new plant seeds to the right; once the buffer fills, the whole
+        canvas scrolls left treadmill-style.
+
+        Persistent PIL framebuffer — once pixels are deposited they
+        stay, so the visible plant is literally the accumulated record
+        of every audio frame that built it.
+        """
+        if not _HAS_PIL:
+            return
+        scope = self.scope
+        if not scope._bezel_drawn:
+            scope.draw_bezel()
+            scope.draw_graticule()
+        scope.delete("trace")
+        scope.delete("bars")
+
+        cx, cy, r = scope.get_draw_area()
+        N = self._garden_size
+
+        # ---- Lazy buffer setup ----
+        if self._garden_buffer is None:
+            self._garden_buffer = Image.new("RGB", (N, N), (0, 0, 0))
+        if not self._garden_plants:
+            self._spawn_garden_plant()
+
+        # ---- Pull audio features ----
+        _ref, mic = self.engine.get_lissajous_data(
+            note_freq(self.root_note, self.octave), num_points=1024,
+        )
+        if len(mic) >= 64:
+            rms = float(np.sqrt(np.mean(mic * mic)))
+            peak = float(np.max(np.abs(mic)))
+            spectrum_bars, centroid_hz = self._garden_spectrum(mic)
+        else:
+            rms, peak = 0.0, 0.0
+            spectrum_bars = np.zeros(self.GARDEN_NUM_BARS)
+            centroid_hz = self._garden_centroid_smooth
+
+        # Smooth the audio env so a single popping sample doesn't fire
+        # spurious branches; smooth the centroid so the drift reads as
+        # gentle leaning rather than jitter.
+        self._garden_audio_env = 0.85 * self._garden_audio_env + 0.15 * rms
+        self._garden_centroid_smooth = (
+            0.96 * self._garden_centroid_smooth + 0.04 * centroid_hz
+        )
+        # Centroid → drift: warm/low (200-600 Hz) leans left, bright/high
+        # (2000+ Hz) leans right. Mapped to ±0.15 rad/frame on the head
+        # direction, gentle by design.
+        cnorm = (np.log2(max(50.0, self._garden_centroid_smooth) / 100.0)
+                 / np.log2(40.0))   # 0..1ish across 100 Hz..4 kHz
+        drift = (cnorm - 0.5) * 0.06    # radians per frame, ± 0.03
+
+        # Hue ticks forward regardless of playing — gives the garden a
+        # slow rainbow signature so plants from different "eras" of the
+        # session look distinguishable.
+        self._garden_hue = (self._garden_hue + self.GARDEN_HUE_PER_FRAME) % 1.0
+        hue_now = self._garden_hue
+
+        # ---- Step every alive branch in the current plant ----
+        draw = ImageDraw.Draw(self._garden_buffer)
+        plant = self._garden_plants[-1]
+        any_alive = False
+        for branch in plant["branches"]:
+            if not branch["alive"]:
+                continue
+            self._garden_step_branch(
+                branch, draw, spectrum_bars, drift,
+                self._garden_audio_env, hue_now,
+            )
+            if branch["alive"]:
+                any_alive = True
+
+        # ---- Audio-triggered branching ----
+        # Peak amplitude above a moving threshold AND not too recently
+        # after the previous branch event = a new branching tick. We
+        # split the currently-most-vigorous tip into 2 children.
+        plant["frames_alive"] += 1
+        frames_since_branch = plant["frames_alive"] - self._garden_last_branch_frame
+        if (peak > 0.04
+                and peak > 1.7 * self._garden_audio_env
+                and frames_since_branch > 25
+                and any_alive):
+            self._garden_branch_tip(plant, hue_now)
+            self._garden_last_branch_frame = plant["frames_alive"]
+
+        # Volume modulates growth: louder play = branches advance
+        # faster. Handled by multiplying speed inside _garden_step_branch.
+
+        # ---- If current plant is finished, spawn a new one ----
+        if not any_alive:
+            self._spawn_garden_plant()
+            # If we ran past the right edge, scroll the buffer left so
+            # the new plant has room — treadmill mode kicks in.
+            if self._garden_next_plant_x > N - 50:
+                self._garden_scroll_left(int(N * 0.4))
+
+        # ---- Push the buffer to the scope canvas ----
+        display_size = int(r * 2 * 0.95)
+        display_img = self._garden_buffer.resize(
+            (display_size, display_size), Image.BILINEAR,
+        )
+        self._garden_photo = ImageTk.PhotoImage(display_img)
+        if self._garden_canvas_item is None:
+            self._garden_canvas_item = scope.create_image(
+                cx, cy, image=self._garden_photo, tags="garden",
+            )
+        else:
+            scope.itemconfigure(self._garden_canvas_item, image=self._garden_photo)
+            scope.coords(self._garden_canvas_item, cx, cy)
+
+        scope.draw_mask()
+        try:
+            scope.tag_raise("garden", "graticule")
+            scope.tag_raise("bezel_ring", "garden")
+        except Exception:
+            pass
+
+    GARDEN_NUM_BARS = 18
+
+    def _garden_spectrum(self, mic):
+        """Return (bars, centroid_hz). Bars are log-bucketed FFT mags,
+        normalized 0..1. Centroid is amplitude-weighted mean frequency.
+        """
+        n = len(mic)
+        if n < 64 or np.max(np.abs(mic)) < 0.0005:
+            return np.zeros(self.GARDEN_NUM_BARS), self._garden_centroid_smooth
+        window = np.hanning(n)
+        spectrum = np.abs(np.fft.rfft(mic * window))
+        freqs = np.fft.rfftfreq(n, 1.0 / self.engine.sr)
+        f_lo, f_hi = 80.0, 4000.0
+        # Spectral centroid (real Hz value).
+        mask = (freqs >= f_lo) & (freqs <= f_hi)
+        if np.any(mask) and spectrum[mask].sum() > 1e-6:
+            centroid_hz = float(
+                (freqs[mask] * spectrum[mask]).sum() / spectrum[mask].sum()
+            )
+        else:
+            centroid_hz = self._garden_centroid_smooth
+        # Log-bucketed bars for the rib profile.
+        log_edges = np.logspace(np.log10(f_lo), np.log10(f_hi),
+                                 self.GARDEN_NUM_BARS + 1)
+        bar_idx = np.digitize(freqs, log_edges) - 1
+        bars = np.zeros(self.GARDEN_NUM_BARS)
+        for i in range(self.GARDEN_NUM_BARS):
+            sel = bar_idx == i
+            if np.any(sel):
+                bars[i] = spectrum[sel].max()
+        peak = bars.max() if bars.max() > 0 else 1.0
+        bars = np.sqrt(bars / peak)   # soft curve, brings up quiet partials
+        return bars, centroid_hz
+
+    def _spawn_garden_plant(self):
+        """Seed a new plant at the next garden slot."""
+        N = self._garden_size
+        x = self._garden_next_plant_x
+        y = N - 8.0   # rooted near the bottom
+        plant = {
+            "frames_alive": 0,
+            "branches": [{
+                "x": x, "y": y,
+                "angle": -np.pi / 2,    # straight up
+                "speed": self.GARDEN_PLANT_BASE_SPEED,
+                "width": self.GARDEN_PLANT_BASE_WIDTH,
+                "life": self.GARDEN_PLANT_BASE_LIFE,
+                "depth": 0,
+                "age": 0,
+                "alive": True,
+                "rotation_index": 0,   # for golden-angle phyllotaxis
+            }],
+        }
+        self._garden_plants.append(plant)
+        # Keep the plant list bounded so we don't grow memory forever.
+        if len(self._garden_plants) > 8:
+            self._garden_plants.pop(0)
+        # Step the next-plant cursor to the right.
+        self._garden_next_plant_x += 40.0
+
+    def _garden_step_branch(self, branch, draw, spectrum_bars, drift,
+                            audio_env, hue):
+        """Advance one branch by one frame, stamping its rib."""
+        # Aging + dominance check
+        branch["age"] += 1
+        if branch["age"] >= branch["life"]:
+            branch["alive"] = False
+            return
+
+        # Direction curves with audio centroid drift, with a slight
+        # bias upward (negative y) so branches don't run straight
+        # sideways indefinitely.
+        upward_bias = 0.0
+        if abs(branch["angle"] + np.pi / 2) > 0.7:
+            # Branch is tilted >40° off vertical — nudge back toward up
+            upward_bias = -0.01 * np.sign(branch["angle"] + np.pi / 2)
+        branch["angle"] += drift * (1.0 - 0.4 * branch["depth"]) + upward_bias
+
+        # Speed scales with volume — louder = faster growth (Matt's ask)
+        speed = branch["speed"] * (1.0 + 1.5 * audio_env)
+
+        # Advance the print-head
+        dx = np.cos(branch["angle"]) * speed
+        dy = np.sin(branch["angle"]) * speed
+        branch["x"] += dx
+        branch["y"] += dy
+
+        # Off-canvas check
+        N = self._garden_size
+        if (branch["x"] < 2 or branch["x"] > N - 2
+                or branch["y"] < 2 or branch["y"] > N - 2):
+            branch["alive"] = False
+            return
+
+        # Stamp the rib perpendicular to direction. The FFT bars define
+        # the intensity profile across the rib width.
+        perp_x = -np.sin(branch["angle"])
+        perp_y = np.cos(branch["angle"])
+        width = branch["width"]
+        # Color: cycle through hue with saturation a bit lower than the
+        # waterfall (plants look better with muted tones than pure
+        # rainbow). Brightness ties to current audio so quiet playing
+        # produces fainter pixels.
+        bright = min(1.0, 0.45 + audio_env * 2.5)
+        r_, g_, b_ = colorsys.hsv_to_rgb(hue, 0.78, bright)
+        base_color = (int(r_ * 255), int(g_ * 255), int(b_ * 255))
+
+        n_bars = self.GARDEN_NUM_BARS
+        for i, mag in enumerate(spectrum_bars):
+            # Symmetric profile: bar i maps to ±offset from centerline.
+            offset_units = (i + 0.5) / n_bars   # 0..1
+            for sign in (-1.0, 1.0):
+                offset = sign * offset_units * (width * 0.5) * (0.4 + 0.6 * mag)
+                px = branch["x"] + perp_x * offset
+                py = branch["y"] + perp_y * offset
+                # Intensity along the rib — peaks bright, valleys dim.
+                inten = 0.35 + 0.65 * mag
+                color = (
+                    int(base_color[0] * inten),
+                    int(base_color[1] * inten),
+                    int(base_color[2] * inten),
+                )
+                # Composite over whatever's already there (max-blend
+                # so we never DARKEN existing pixels — the plant only
+                # gets brighter as more material accumulates).
+                self._garden_set_pixel(px, py, color)
+
+        # Also brighten the centerline so the stem reads clearly even
+        # when the FFT happens to be quiet.
+        stem_color = (
+            int(base_color[0] * 0.9),
+            int(base_color[1] * 0.9),
+            int(base_color[2] * 0.9),
+        )
+        self._garden_set_pixel(branch["x"], branch["y"], stem_color)
+
+    def _garden_set_pixel(self, x, y, color):
+        """Max-blend a pixel into the garden buffer. Out-of-bounds is
+        silently ignored."""
+        if self._garden_buffer is None:
+            return
+        N = self._garden_size
+        ix, iy = int(x), int(y)
+        if 0 <= ix < N and 0 <= iy < N:
+            existing = self._garden_buffer.getpixel((ix, iy))
+            blended = (
+                max(existing[0], color[0]),
+                max(existing[1], color[1]),
+                max(existing[2], color[2]),
+            )
+            self._garden_buffer.putpixel((ix, iy), blended)
+
+    def _garden_branch_tip(self, plant, hue):
+        """Find the most vigorous alive tip and split it into 2 children.
+
+        Child angles: ± GARDEN_BRANCH_FAN from a parent-axis-rotated-by-
+        golden-angle direction. The rotation_index advances each branch
+        event so successive children spread around the parent rather
+        than stacking on one side (phyllotaxis)."""
+        # Pick the most vigorous tip (highest remaining life × width)
+        alive = [b for b in plant["branches"] if b["alive"]]
+        if not alive:
+            return
+        parent = max(alive, key=lambda b: (b["life"] - b["age"]) * b["width"])
+        if parent["depth"] >= self.GARDEN_MAX_DEPTH:
+            return
+
+        # Phyllotaxis rotation index applied to the fan direction.
+        rot = (parent["rotation_index"] + 1) * self.GARDEN_GOLDEN_ANGLE
+        # We project the golden-angle rotation into 2D by treating it as
+        # a small additional twist applied to the fan center.
+        fan_center = parent["angle"] + 0.15 * np.sin(rot)
+
+        children = []
+        for sign in (-1.0, 1.0):
+            child = {
+                "x": parent["x"],
+                "y": parent["y"],
+                "angle": fan_center + sign * self.GARDEN_BRANCH_FAN,
+                "speed": parent["speed"] * self.GARDEN_DEPTH_DECAY_SPEED,
+                "width": parent["width"] * self.GARDEN_DEPTH_DECAY_WIDTH,
+                "life": int(parent["life"] * self.GARDEN_DEPTH_DECAY_LIFE),
+                "depth": parent["depth"] + 1,
+                "age": 0,
+                "alive": True,
+                "rotation_index": parent["rotation_index"] + 1,
+            }
+            children.append(child)
+        # The parent stops growing — its children carry the apex forward.
+        # This is the apical-dominance trick: one main shoot at any given
+        # depth, then it branches and the new shoots inherit the role.
+        parent["alive"] = False
+        plant["branches"].extend(children)
+
+    def _garden_scroll_left(self, px):
+        """Treadmill-scroll the garden buffer left by `px` pixels so a
+        new plant has room on the right."""
+        if self._garden_buffer is None:
+            return
+        N = self._garden_size
+        shifted = Image.new("RGB", (N, N), (0, 0, 0))
+        cropped = self._garden_buffer.crop((px, 0, N, N))
+        shifted.paste(cropped, (0, 0))
+        self._garden_buffer = shifted
+        # Shift the active branches and the next-plant cursor along.
+        for plant in self._garden_plants:
+            for b in plant["branches"]:
+                b["x"] -= px
+                if b["x"] < 0:
+                    b["alive"] = False
+        self._garden_next_plant_x -= px
 
     def _draw_interval(self, result, played_freq):
         interval = result["interval"]

@@ -86,7 +86,7 @@ SECTIONS = [
         "Transpose: same as the tuner — shifts the note labels to "
         "match your horn's key.",
         "",
-        "Visualizers (Options > Visualizer > Mode): five ways to see "
+        "Visualizers (Options > Visualizer > Mode): six ways to see "
         "what's happening on the round green CRT:",
         "  • Lissajous (default) — interference between your note and "
         "the drone. A stable shape = the ratio is locked. A spinning "
@@ -108,6 +108,16 @@ SECTIONS = [
         "shapes on top, so what you see is a recursive blooming "
         "pattern that pulses with your playing. Not analytical — "
         "just a hypnotic backdrop for long practice sessions.",
+        "  • Garden — branching plants that grow as you play. Each "
+        "branch is a print head that stamps the current FFT cross-"
+        "section perpendicular to its growth direction; amplitude "
+        "peaks trigger branch splits (L-system style); spectral "
+        "centroid drives a slow lateral drift so warm playing leans "
+        "one way and bright playing the other. When one plant "
+        "matures a new one seeds beside it, and once the canvas "
+        "fills, the garden treadmills along to make room. Slow "
+        "rainbow hue cycle through the session, so the garden "
+        "reads its own history.",
         "",
         "Show ET Difference: when on, the meter shows how far the "
         "just-intonation interval sits from equal temperament. Useful "
