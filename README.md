@@ -30,10 +30,17 @@ A drone synthesizer with live just-intonation interval analysis. Set a root, fli
 - Root note selector across all 12 chromatic pitches, with a dice button for random root practice
 - DRONE switch with vintage labeled OFF / ON positions
 - Drone voicings: root, root + fifth, major triad, minor triad
-- Drone sound: pure sine or rich harmonic stack
+- Drone sound: pure sine, rich harmonic stack, or **WAV sample** — load a sustained-tone file from disk or record one off the mic; pitch is auto-detected via YIN, attack/release are trimmed, and an equal-power crossfade at the loop boundary makes it loop cleanly. The voicing system layers pitch-shifted copies of the sample, so one recorded "ahhh" becomes a layered choral drone in major-triad voicing
 - Octave selector (2-5) for the drone fundamental
 - Interval meter with LOCKED indicator (within 5¢ of just intonation) and cents readout
-- Lissajous oscilloscope with configurable phosphor color (green, amber, blue, white), trace thickness, trail count, and resolution
+- Six visualizer modes for the round CRT (Options > Visualizer > Mode):
+  - **Lissajous** — interference between your note and the drone
+  - **Waveform** — classic horizontal oscilloscope
+  - **Spectrum** — log-frequency FFT bars
+  - **Waterfall** — rolling 3D spectrum / mountain-range view with slow color cycle
+  - **Warp** — Geiss-style feedback bloom (hypnotic backdrop)
+  - **Garden (beta)** — branching audio-driven plants that grow as you play, with leaves on sub-branches, species-styled flowers at maturity, drifting yellow-green fireflies that spawn faster when you sustain notes, and a treadmill-scrolling garden when the canvas fills
+- Phosphor color (green / amber / blue / white), trace thickness, Lissajous trail count, and resolution are configurable per-mode
 - Show ET Difference toggle — see how far each JI interval sits from equal temperament
 - Transposition support (Concert, B♭, E♭, F) so written-pitch instruments see their own note names
 - Instrument presets for pitch detection (sax family, voice, brass, strings, etc.)

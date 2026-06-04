@@ -152,6 +152,11 @@ class ExerciserView:
         self._garden_audio_env = 0.0     # smoothed RMS for branching triggers
         self._garden_last_branch_frame = -999
         self._garden_circle_mask = None  # PIL "L"-mode mask sized to display
+        # Fireflies — transient overlay drifting above the garden.
+        # Don't write to the persistent buffer (they'd leave trails);
+        # composited onto a per-frame copy at display time.
+        self._garden_fireflies = []      # list of firefly dicts
+        self._garden_firefly_spawn = 0   # cooldown counter
 
         # Audio engine (created up-front so settings dialogs can list
         # devices, but the input stream isn't started until start()).
@@ -307,8 +312,12 @@ class ExerciserView:
         mode_menu = tk.Menu(viz_menu, tearoff=0)
         viz_menu.add_cascade(label="Mode", menu=mode_menu)
         for mode_name in self._available_modes:
+            # The displayed label can include qualifiers like "(beta)"
+            # while the underlying value stays plain — settings stored
+            # in app_settings.json still round-trip cleanly.
+            display = mode_name + " (beta)" if mode_name == "Garden" else mode_name
             mode_menu.add_radiobutton(
-                label=mode_name, variable=self.visualizer_mode, value=mode_name,
+                label=display, variable=self.visualizer_mode, value=mode_name,
                 command=self._on_visualizer_mode_changed,
             )
 
@@ -848,6 +857,8 @@ class ExerciserView:
         self._garden_audio_env = 0.0
         self._garden_last_branch_frame = -999
         self._garden_circle_mask = None
+        self._garden_fireflies = []
+        self._garden_firefly_spawn = 0
 
     def _update_analysis(self):
         if not self._running:
@@ -1387,6 +1398,9 @@ class ExerciserView:
     GARDEN_HUE_PER_FRAME = 0.00045      # slow rainbow cycle for the ribbon
     GARDEN_LEAF_INTERVAL = 22           # avg frames between leaf drops on a branch
     GARDEN_LEAF_MIN_DEPTH = 1           # main stem doesn't get leaves; sub-branches do
+    GARDEN_FIREFLY_CAP = 14             # max concurrent fireflies
+    GARDEN_FIREFLY_BASE_RATE = 60       # base frames-per-spawn at silence
+    GARDEN_FIREFLY_LIFE = 420           # frames a firefly lives (~7s at 60fps)
     # Flower shape vocabulary — each plant picks one species-style at
     # spawn time, so every flower on the plant matches and the garden
     # reads as a mix of species rather than a parade of identical
@@ -1500,13 +1514,23 @@ class ExerciserView:
             if self._garden_next_plant_x > N - 50:
                 self._garden_scroll_left(int(N * 0.4))
 
+        # ---- Fireflies (transient — not painted into the persistent
+        # buffer so they don't leave trails). Step every active one,
+        # spawn new ones based on a per-frame budget that's faster
+        # when there's sustained playing.
+        self._garden_step_fireflies(self._garden_audio_env)
+
         # ---- Push the buffer to the scope canvas ----
-        # Resize the square framebuffer to the scope's inner draw area,
-        # then mask it to a circle so the corners don't poke past the
-        # bezel ring. The mask is cached by size since the scope area
-        # doesn't change between frames.
+        # Composite fireflies onto a copy of the persistent buffer so
+        # they're transient (no trails into the plant material). Then
+        # resize to the scope's inner draw area and mask to a circle
+        # so the corners don't poke past the bezel ring. The mask is
+        # cached by size since the scope area doesn't change.
+        composite = self._garden_buffer.copy()
+        if self._garden_fireflies:
+            self._garden_render_fireflies(composite)
         display_size = int(r * 2 * 0.95)
-        display_img = self._garden_buffer.resize(
+        display_img = composite.resize(
             (display_size, display_size), Image.BILINEAR,
         )
         mask = self._get_garden_circle_mask(display_size)
@@ -1985,6 +2009,98 @@ class ExerciserView:
                 if b["x"] < 0:
                     b["alive"] = False
         self._garden_next_plant_x -= px
+        # Drift fireflies along with the scroll so they don't appear to
+        # snap relative to the garden under them.
+        for ff in self._garden_fireflies:
+            ff["x"] -= px
+
+    def _garden_step_fireflies(self, audio_env):
+        """Update positions, flicker phase, and lifetimes of all
+        fireflies. Spawn new ones based on a per-frame budget that
+        scales with sustained playing volume."""
+        N = self._garden_size
+
+        # Spawn — base rate at silence, faster when sustained playing
+        # gives the audio envelope a nonzero floor.
+        self._garden_firefly_spawn -= 1
+        if self._garden_firefly_spawn <= 0:
+            if len(self._garden_fireflies) < self.GARDEN_FIREFLY_CAP:
+                self._spawn_garden_firefly()
+            # Loudness shortens the spawn cooldown by up to 4×.
+            rate = self.GARDEN_FIREFLY_BASE_RATE / max(0.25, 1.0 + audio_env * 6.0)
+            self._garden_firefly_spawn = int(rate * random.uniform(0.6, 1.4))
+
+        # Step
+        alive = []
+        for ff in self._garden_fireflies:
+            ff["age"] += 1
+            if ff["age"] >= ff["life"]:
+                continue
+            # Small random impulse + damping = brownian drift with
+            # smoothness. Upward bias keeps fireflies from sinking out
+            # the bottom over time.
+            ff["vx"] = ff["vx"] * 0.92 + random.uniform(-0.18, 0.18)
+            ff["vy"] = ff["vy"] * 0.92 + random.uniform(-0.18, 0.18) - 0.025
+            ff["x"] += ff["vx"]
+            ff["y"] += ff["vy"]
+            ff["phase"] += ff["flicker_rate"]
+            # Kill if it wandered out of bounds.
+            if (ff["x"] < -4 or ff["x"] > N + 4
+                    or ff["y"] < -4 or ff["y"] > N + 4):
+                continue
+            alive.append(ff)
+        self._garden_fireflies = alive
+
+    def _spawn_garden_firefly(self):
+        """Drop a new firefly at a random point in the upper 60% of the
+        canvas."""
+        N = self._garden_size
+        ff = {
+            "x": random.uniform(20, N - 20),
+            "y": random.uniform(N * 0.10, N * 0.65),
+            "vx": random.uniform(-0.3, 0.3),
+            "vy": random.uniform(-0.15, 0.05),
+            "phase": random.uniform(0, 2 * np.pi),
+            "flicker_rate": random.uniform(0.10, 0.20),
+            "age": 0,
+            "life": int(self.GARDEN_FIREFLY_LIFE * random.uniform(0.7, 1.2)),
+            "hue": random.uniform(0.11, 0.18),    # narrow yellow-green band
+        }
+        self._garden_fireflies.append(ff)
+
+    def _garden_render_fireflies(self, target_img):
+        """Paint every alive firefly onto `target_img` (the per-frame
+        composite). Each firefly is a 3-layer glow stack: bright core,
+        mid halo, dim outer halo — same trick the motor pilot uses.
+        Brightness modulates with the flicker phase and a fade in/out
+        at the start and end of life."""
+        draw = ImageDraw.Draw(target_img)
+        for ff in self._garden_fireflies:
+            # Flicker: sine wave around a mid brightness.
+            flick = 0.55 + 0.45 * np.sin(ff["phase"])
+            # Lifetime fade — first 30 frames fade in, last 30 fade out.
+            fade_in = min(1.0, ff["age"] / 30.0)
+            fade_out = min(1.0, (ff["life"] - ff["age"]) / 30.0)
+            life_env = max(0.0, min(fade_in, fade_out))
+            intensity = flick * life_env
+            if intensity < 0.05:
+                continue
+            x, y = ff["x"], ff["y"]
+            # Three concentric layers like the motor pilot's glow stack.
+            for radius, weight in ((2.6, 0.35), (1.6, 0.65), (0.8, 1.0)):
+                a = intensity * weight
+                # Hue → RGB at the firefly's own warm yellow-green.
+                r_, g_, b_ = colorsys.hsv_to_rgb(ff["hue"], 0.65, a)
+                color = (int(r_ * 255), int(g_ * 255), int(b_ * 255))
+                if color == (0, 0, 0):
+                    continue
+                try:
+                    draw.ellipse(
+                        [x - radius, y - radius, x + radius, y + radius],
+                        fill=color, outline=color,
+                    )
+                except Exception:
+                    pass
 
     def _draw_interval(self, result, played_freq):
         interval = result["interval"]
