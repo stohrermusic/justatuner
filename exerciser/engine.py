@@ -1,6 +1,8 @@
 """Audio engine: drone synthesis and microphone input with pitch detection."""
 
+import os
 import threading
+import wave
 import numpy as np
 
 try:
@@ -93,7 +95,7 @@ class AudioEngine:
         self.drone_on = False
         self.drone_freq = 261.63      # C4
         self.drone_voicing = "root"   # root, fifth, major, minor
-        self.drone_type = "rich"      # sine, rich
+        self.drone_type = "rich"      # sine, rich, sample
         self.drone_volume = 0.3
 
         # Oscillator internals
@@ -102,6 +104,26 @@ class AudioEngine:
         self._target_amp = 0.0        # for fade in/out
         self._current_amp = 0.0
         self._amp_slew = 0.005        # amplitude change per sample
+
+        # Sample-drone state. When drone_type == "sample" and a sample is
+        # loaded, _output_callback resamples it on the fly to whatever
+        # frequency each voice in the voicing is set to (instead of
+        # summing sine oscillators). The same voicing list (_osc_freqs)
+        # drives both paths — for samples it's a list of (freq, amp)
+        # playheads instead of oscillators. _sample_phases is the float
+        # playback position into _drone_sample for each voice.
+        self._drone_sample = None       # numpy float32, mono, normalized
+        self._drone_sample_sr = None    # original sample rate
+        self._drone_sample_freq = None  # detected fundamental Hz
+        self._drone_sample_label = ""   # short label for UI ("file.wav" or "recorded")
+        self._sample_phases = None      # float ndarray, one per voice
+        self._sample_lock = threading.Lock()
+
+        # Recording state — append to _recording_chunks from _input_callback
+        # when _recording is True; concatenate on stop.
+        self._recording = False
+        self._recording_chunks = []
+        self._recording_lock = threading.Lock()
 
         # Streams
         self._input_stream = None
@@ -302,25 +324,34 @@ class AudioEngine:
             self.buffer_ready = True
         with self._lissajous_lock:
             self._lissajous_mic = data
+        # Recording path: append a copy of this block to the recording
+        # buffer when active. We hold the lock briefly to avoid racing
+        # with stop_and_use's concatenation.
+        if self._recording:
+            with self._recording_lock:
+                if self._recording:
+                    self._recording_chunks.append(data.copy())
 
     def _output_callback(self, outdata, frames, time_info, status):
         if not self._osc_freqs:
             outdata[:] = 0
             return
 
-        freqs = np.array([f for f, _ in self._osc_freqs])
-        amps = np.array([a for _, a in self._osc_freqs])
+        # ---- Synthesize the per-voice signal ----
+        if self.drone_type == "sample" and self._drone_sample is not None:
+            signal = self._render_sample_voices(frames)
+        else:
+            freqs = np.array([f for f, _ in self._osc_freqs])
+            amps = np.array([a for _, a in self._osc_freqs])
+            phase_incs = 2.0 * np.pi * freqs / self.sr
+            t = np.arange(frames).reshape(-1, 1)
+            phases = self._osc_phases + phase_incs * t
+            signal = np.sum(amps * np.sin(phases), axis=1)
+            self._osc_phases = (self._osc_phases + phase_incs * frames) % (2 * np.pi)
+            peak = max(np.sum(amps), 0.01)
+            signal = signal / peak
 
-        phase_incs = 2.0 * np.pi * freqs / self.sr
-        t = np.arange(frames).reshape(-1, 1)
-        phases = self._osc_phases + phase_incs * t
-        signal = np.sum(amps * np.sin(phases), axis=1)
-
-        self._osc_phases = (self._osc_phases + phase_incs * frames) % (2 * np.pi)
-
-        peak = max(np.sum(amps), 0.01)
-        signal = signal / peak
-
+        # ---- Amp envelope (slew for fade in/out) ----
         envelope = np.empty(frames)
         for i in range(frames):
             if self._current_amp < self._target_amp:
@@ -335,6 +366,161 @@ class AudioEngine:
 
         signal *= envelope
         outdata[:, 0] = np.clip(signal, -1.0, 1.0).astype(np.float32)
+
+    def _render_sample_voices(self, frames):
+        """Resample-and-loop the loaded WAV sample for every voice in
+        the current voicing, sum the results, normalize. Runs on the
+        audio callback thread."""
+        with self._sample_lock:
+            sample = self._drone_sample
+            sample_sr = self._drone_sample_sr
+            sample_freq = self._drone_sample_freq
+            phases = self._sample_phases
+        if sample is None or phases is None or len(self._osc_freqs) == 0:
+            return np.zeros(frames, dtype=np.float64)
+
+        N = sample.shape[0]
+        amps = np.array([a for _, a in self._osc_freqs])
+        # Per-voice playback rate. Pitch shift = target_freq / sample_freq;
+        # sample-rate ratio = sample_sr / output_sr; combined drives how
+        # many sample-frames to advance per output frame.
+        rates = np.array([
+            (f / sample_freq) * (sample_sr / self.sr)
+            for f, _ in self._osc_freqs
+        ])
+
+        signal = np.zeros(frames, dtype=np.float64)
+        for v in range(len(self._osc_freqs)):
+            pos = phases[v]
+            rate = rates[v]
+            # Vectorized sample positions for this voice's `frames`
+            # output samples, wrapped modulo N.
+            idx_float = (pos + rate * np.arange(frames)) % N
+            i0 = idx_float.astype(np.int64)
+            frac = idx_float - i0
+            i1 = (i0 + 1) % N
+            voice = sample[i0] * (1.0 - frac) + sample[i1] * frac
+            signal += amps[v] * voice
+            phases[v] = (pos + rate * frames) % N
+
+        with self._sample_lock:
+            self._sample_phases = phases
+
+        peak = max(float(np.sum(amps)), 0.01)
+        return signal / peak
+
+    # ----- Sample loading / recording / clearing -----
+
+    def load_sample_wav(self, path):
+        """Load a WAV file, detect its fundamental pitch, and install it
+        as the drone sample. Switches ``drone_type`` to ``'sample'``.
+
+        Returns a dict with ``sr``, ``freq_hz``, ``duration_s``, ``label``
+        for the UI to display. Raises ValueError / OSError on bad input.
+        """
+        sample, sr = _read_wav_file(path)
+        return self._install_sample(sample, sr, label=os.path.basename(path))
+
+    def record_start(self):
+        """Begin capturing input frames into the recording buffer."""
+        with self._recording_lock:
+            self._recording_chunks = []
+            self._recording = True
+
+    def record_stop_and_use(self):
+        """Stop the recording, concatenate the captured frames, analyze
+        their pitch, and install them as the drone sample. Returns the
+        same dict as ``load_sample_wav`` or None if nothing was captured."""
+        with self._recording_lock:
+            self._recording = False
+            chunks = self._recording_chunks
+            self._recording_chunks = []
+        if not chunks:
+            return None
+        sample = np.concatenate(chunks).astype(np.float32)
+        if len(sample) < int(self.sr * 0.2):
+            return None  # too short to be useful (~200ms)
+        # Normalize to peak 0.95 so quiet recordings still drive the drone.
+        peak = float(np.max(np.abs(sample)))
+        if peak > 0.001:
+            sample = sample / peak * 0.95
+        return self._install_sample(sample, self.sr, label="recorded")
+
+    def record_cancel(self):
+        """Drop any in-flight recording without installing it."""
+        with self._recording_lock:
+            self._recording = False
+            self._recording_chunks = []
+
+    def is_recording(self):
+        return self._recording
+
+    def recorded_duration_s(self):
+        """Approximate duration of the in-flight recording in seconds."""
+        with self._recording_lock:
+            total = sum(len(c) for c in self._recording_chunks)
+        return total / self.sr if self.sr else 0.0
+
+    def clear_sample(self):
+        """Drop the loaded sample. Drone falls back to whatever synth
+        type the caller chooses next via set_drone(dtype=...)."""
+        with self._sample_lock:
+            self._drone_sample = None
+            self._drone_sample_sr = None
+            self._drone_sample_freq = None
+            self._drone_sample_label = ""
+            self._sample_phases = None
+        if self.drone_type == "sample":
+            self.drone_type = "rich"
+            self._rebuild_oscillators()
+
+    def sample_info(self):
+        """Return a (label, freq_hz) tuple describing the loaded sample,
+        or (None, None) if none is loaded."""
+        with self._sample_lock:
+            if self._drone_sample is None:
+                return (None, None)
+            return (self._drone_sample_label, self._drone_sample_freq)
+
+    def _install_sample(self, sample, sr, label):
+        """Detect pitch + swap in a new drone sample. Holds the sample
+        lock only briefly so the audio callback isn't blocked."""
+        # Take a window from the middle of the recording — avoids any
+        # attack transients at the very start or release at the end.
+        N = len(sample)
+        mid_start = max(0, N // 2 - sr)        # 1s before midpoint
+        mid_end = min(N, N // 2 + sr)          # 1s after
+        window = sample[mid_start:mid_end] if mid_end > mid_start else sample
+        freq, conf = yin_detect(
+            window.astype(np.float32), sr,
+            fmin=55, fmax=2000, threshold=0.30,
+        )
+        if freq is None or conf < 0.15:
+            # Couldn't detect a pitch — fall back to A4 so we still play
+            # *something*, and let the UI surface the ambiguity.
+            freq = 440.0
+
+        with self._sample_lock:
+            self._drone_sample = sample.astype(np.float32)
+            self._drone_sample_sr = sr
+            self._drone_sample_freq = float(freq)
+            self._drone_sample_label = label
+            # Reset playback heads for the current voicing length.
+            n_voices = max(1, len(self._osc_freqs))
+            self._sample_phases = np.zeros(n_voices)
+
+        # Switch to sample mode and rebuild voicing list (which also
+        # re-sizes _sample_phases via _rebuild_oscillators).
+        self.drone_type = "sample"
+        self._rebuild_oscillators()
+
+        return {
+            "sr": sr,
+            "freq_hz": float(freq),
+            "duration_s": N / sr,
+            "label": label,
+            "pitch_confident": conf >= 0.15,
+        }
 
     def _rebuild_oscillators(self):
         """Recalculate oscillator bank for current drone settings."""
@@ -351,7 +537,13 @@ class AudioEngine:
             voices.append((f * 3 / 2, 0.7))
 
         osc_list = []
-        if self.drone_type == "sine":
+        if self.drone_type == "sample":
+            # One playback head per voicing voice — the sample already
+            # carries its own harmonics, so we don't stack a harmonic
+            # bank on top of it (that would just create comb-filter
+            # artifacts).
+            osc_list = voices[:]
+        elif self.drone_type == "sine":
             osc_list = voices[:]
         else:  # rich
             for base_f, base_a in voices:
@@ -361,3 +553,58 @@ class AudioEngine:
 
         self._osc_freqs = osc_list
         self._osc_phases = np.zeros(len(osc_list))
+        # Re-size sample playback heads to match voicing length.
+        with self._sample_lock:
+            if self._drone_sample is not None:
+                self._sample_phases = np.zeros(len(osc_list))
+
+
+# ----- WAV file reader -----
+
+def _read_wav_file(path):
+    """Read a WAV file → (mono float32 numpy array in -1..1, sample rate).
+
+    Handles 16-bit, 24-bit, and 32-bit PCM, plus 32-bit float WAVs.
+    Stereo files are downmixed to mono by averaging channels.
+    """
+    with wave.open(path, 'rb') as w:
+        n_channels = w.getnchannels()
+        samp_width = w.getsampwidth()
+        sr = w.getframerate()
+        n_frames = w.getnframes()
+        raw = w.readframes(n_frames)
+
+    # wave can't tell us float-vs-int — but PCM WAVs report a known
+    # sample width (2/3/4 bytes) and float WAVs report 4 bytes with
+    # a different format tag we can't read via the stdlib `wave`
+    # module. The float case is rare for the kinds of files users
+    # will load here (instrument samples are almost always int16),
+    # so we default to int and document the limitation.
+    if samp_width == 2:
+        data = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+    elif samp_width == 4:
+        # Could be int32 or float32; pick by range probing the first
+        # ~1k samples — if any |sample| > 1.5, it's int32.
+        i32 = np.frombuffer(raw, dtype=np.int32)
+        f32 = np.frombuffer(raw, dtype=np.float32)
+        probe = f32[: min(1024, len(f32))]
+        if probe.size and np.max(np.abs(probe)) <= 1.5:
+            data = f32.astype(np.float32)
+        else:
+            data = i32.astype(np.float32) / 2147483648.0
+    elif samp_width == 3:
+        # 24-bit PCM — unpack three bytes at a time, sign-extend to int32.
+        arr = np.frombuffer(raw, dtype=np.uint8).reshape(-1, 3)
+        i32 = (arr[:, 0].astype(np.int32) |
+               (arr[:, 1].astype(np.int32) << 8) |
+               (arr[:, 2].astype(np.int32) << 16))
+        # Sign-extend the 24-bit values.
+        i32 = np.where(i32 & 0x800000, i32 | ~0xFFFFFF, i32)
+        data = i32.astype(np.float32) / 8388608.0
+    else:
+        raise ValueError(f"Unsupported WAV sample width: {samp_width} bytes")
+
+    if n_channels > 1:
+        data = data.reshape(-1, n_channels).mean(axis=1)
+
+    return data.astype(np.float32), sr

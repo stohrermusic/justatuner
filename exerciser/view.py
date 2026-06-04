@@ -9,7 +9,7 @@ tuner inside JustATuner's notebook.
 import colorsys
 import random
 import tkinter as tk
-from tkinter import ttk
+from tkinter import ttk, filedialog, messagebox
 
 import numpy as np
 
@@ -221,7 +221,11 @@ class ExerciserView:
         self._sound_var = tk.StringVar(value=self.drone_type)
         sound_menu = tk.Menu(drone_menu, tearoff=0)
         drone_menu.add_cascade(label="Sound", menu=sound_menu)
-        for val, label in [("sine", "Sine"), ("rich", "Rich (harmonics)")]:
+        for val, label in [
+            ("sine", "Sine"),
+            ("rich", "Rich (harmonics)"),
+            ("sample", "Sample (WAV)"),
+        ]:
             sound_menu.add_radiobutton(
                 label=label, variable=self._sound_var, value=val,
                 command=self._on_sound_changed,
@@ -238,6 +242,18 @@ class ExerciserView:
                 label=label, variable=self._voicing_var, value=val,
                 command=self._on_voicing_changed,
             )
+
+        # Sample submenu — load a WAV from disk, record a new one off
+        # the mic, or drop the current sample and return to synth.
+        sample_menu = tk.Menu(drone_menu, tearoff=0)
+        drone_menu.add_cascade(label="Sample", menu=sample_menu)
+        sample_menu.add_command(label="Load WAV File...",
+                                command=self._on_load_sample_wav)
+        sample_menu.add_command(label="Record New...",
+                                command=self._on_record_sample)
+        sample_menu.add_separator()
+        sample_menu.add_command(label="Clear Sample (back to synth)",
+                                command=self._on_clear_sample)
 
         # -- Exerciser options menu --
         options_menu = tk.Menu(menubar, tearoff=0)
@@ -612,8 +628,85 @@ class ExerciserView:
         self._update_drone_freq()
 
     def _on_sound_changed(self):
-        self.drone_type = self._sound_var.get()
+        new_type = self._sound_var.get()
+        # Picking Sample with no sample loaded -> bounce straight to
+        # the file picker. If the user cancels we revert to whatever
+        # type was active before.
+        if new_type == "sample":
+            label, _freq = self.engine.sample_info()
+            if label is None:
+                if not self._on_load_sample_wav():
+                    self._sound_var.set(self.drone_type)
+                    return
+        self.drone_type = new_type
         self.engine.set_drone(dtype=self.drone_type)
+
+    def _on_load_sample_wav(self):
+        """Open a file picker, load the chosen WAV as the drone sample.
+        Returns True on success, False on cancel/error."""
+        path = filedialog.askopenfilename(
+            title="Load WAV sample for drone",
+            filetypes=[("WAV audio", "*.wav"), ("All files", "*.*")],
+            parent=self.root,
+        )
+        if not path:
+            return False
+        try:
+            info = self.engine.load_sample_wav(path)
+        except (OSError, ValueError, Exception) as e:
+            messagebox.showerror(
+                "Couldn't load sample",
+                f"Failed to read '{path}':\n\n{e}",
+                parent=self.root,
+            )
+            return False
+        # Engine flipped drone_type to "sample" itself; mirror that in
+        # the local var + menu selection.
+        self.drone_type = "sample"
+        self._sound_var.set("sample")
+        msg = (f"Loaded {info['label']} ({info['duration_s']:.1f}s @ "
+               f"{info['sr']} Hz).\n"
+               f"Detected fundamental: {info['freq_hz']:.1f} Hz"
+               + ("" if info["pitch_confident"]
+                  else " (low confidence — pitch may be off)"))
+        messagebox.showinfo("Sample loaded", msg, parent=self.root)
+        return True
+
+    def _on_record_sample(self):
+        """Pop the recording dialog. On stop, the recorded audio
+        replaces the current drone sample."""
+        # Sample recording reads from the same input stream that's
+        # already running for pitch detection — no separate stream.
+        # If the engine isn't running yet, start it so the input
+        # callback is firing.
+        if not self.engine.running:
+            try:
+                self.engine.start()
+            except Exception as e:
+                messagebox.showerror(
+                    "Can't record",
+                    f"Couldn't open the microphone:\n\n{e}",
+                    parent=self.root,
+                )
+                return
+        RecordSampleDialog(self.root, self.engine, on_complete=self._after_record)
+
+    def _after_record(self, info):
+        if info is None:
+            return  # cancelled or empty
+        self.drone_type = "sample"
+        self._sound_var.set("sample")
+        msg = (f"Recorded {info['duration_s']:.1f}s.\n"
+               f"Detected fundamental: {info['freq_hz']:.1f} Hz"
+               + ("" if info["pitch_confident"]
+                  else " (low confidence — pitch may be off)"))
+        messagebox.showinfo("Sample recorded", msg, parent=self.root)
+
+    def _on_clear_sample(self):
+        self.engine.clear_sample()
+        # Engine reverts drone_type to "rich" inside clear_sample().
+        self.drone_type = self.engine.drone_type
+        self._sound_var.set(self.drone_type)
 
     def _on_voicing_changed(self):
         self.drone_voicing = self._voicing_var.get()
@@ -1375,3 +1468,130 @@ class ExerciserView:
             root_text = f"Root: {root_name} (concert {concert_name}{self.octave})"
         self.played_label.config(text=root_text, fg=COLOR_CREAM_DIM)
         self.et_label.config(text="")
+
+
+# ----- Sample recording dialog -----
+
+class RecordSampleDialog(tk.Toplevel):
+    """Modal-ish recording window. Tells the audio engine to start
+    capturing input frames on open, polls the elapsed-duration counter
+    while open, and on Stop installs the captured audio as the engine's
+    drone sample. Cancel discards the capture.
+
+    A 1.5-second hold-off after open before the Stop button arms,
+    so a quick double-click on "Record New" can't immediately stop
+    a recording that just started.
+    """
+
+    HOLD_OFF_MS = 1500
+
+    def __init__(self, parent, engine, on_complete=None):
+        super().__init__(parent)
+        self.engine = engine
+        self._on_complete = on_complete
+        self._stopped = False
+
+        self.title("Record drone sample")
+        self.configure(bg=COLOR_CHASSIS)
+        self.transient(parent)
+        self.grab_set()
+        self.resizable(False, False)
+        self.protocol("WM_DELETE_WINDOW", self._on_cancel)
+
+        body = tk.Frame(self, bg=COLOR_CHASSIS, padx=24, pady=20)
+        body.pack()
+
+        tk.Label(
+            body, text="● RECORDING", font=("Helvetica", 18, "bold"),
+            fg=COLOR_RED, bg=COLOR_CHASSIS,
+        ).pack(pady=(0, 4))
+
+        tk.Label(
+            body, text=(
+                "Hold a single sustained note — a long tone or drone.\n"
+                "Aim for at least 2 seconds. Click Stop & Use when done."
+            ),
+            font=("Helvetica", 9), fg=COLOR_CREAM_DIM, bg=COLOR_CHASSIS,
+            justify="center",
+        ).pack(pady=(0, 10))
+
+        self.time_label = tk.Label(
+            body, text="0.0 s", font=("Courier", 22, "bold"),
+            fg=COLOR_AMBER, bg=COLOR_CHASSIS,
+        )
+        self.time_label.pack(pady=(0, 12))
+
+        btns = tk.Frame(body, bg=COLOR_CHASSIS)
+        btns.pack(pady=(4, 0))
+
+        self.stop_btn = tk.Button(
+            btns, text="Stop & Use", width=12,
+            font=("Helvetica", 10, "bold"),
+            bg="#2e5c30", fg=COLOR_GREEN,
+            activebackground="#3a7a3c", activeforeground=COLOR_GREEN,
+            relief="flat", bd=0, cursor="hand2",
+            state="disabled",
+            command=self._on_stop_and_use,
+        )
+        self.stop_btn.pack(side="left", padx=4)
+
+        cancel_btn = tk.Button(
+            btns, text="Cancel", width=12,
+            font=("Helvetica", 10),
+            bg=COLOR_BEZEL, fg=COLOR_CREAM,
+            activebackground="#444444", activeforeground=COLOR_CREAM,
+            relief="flat", bd=0, cursor="hand2",
+            command=self._on_cancel,
+        )
+        cancel_btn.pack(side="left", padx=4)
+
+        # Kick off the recording. The dialog's poll loop reads the
+        # elapsed duration from the engine and updates the label.
+        self.engine.record_start()
+        self.after(self.HOLD_OFF_MS, self._arm_stop)
+        self.after(50, self._poll)
+
+    def _arm_stop(self):
+        try:
+            self.stop_btn.config(state="normal")
+        except tk.TclError:
+            pass
+
+    def _poll(self):
+        if self._stopped:
+            return
+        try:
+            dur = self.engine.recorded_duration_s()
+            self.time_label.config(text=f"{dur:.1f} s")
+        except Exception:
+            pass
+        self.after(50, self._poll)
+
+    def _on_stop_and_use(self):
+        if self._stopped:
+            return
+        self._stopped = True
+        try:
+            info = self.engine.record_stop_and_use()
+        except Exception as e:
+            messagebox.showerror(
+                "Recording failed",
+                f"Something went wrong saving the recording:\n\n{e}",
+                parent=self,
+            )
+            info = None
+        self.destroy()
+        if self._on_complete:
+            self._on_complete(info)
+
+    def _on_cancel(self):
+        if self._stopped:
+            return
+        self._stopped = True
+        try:
+            self.engine.record_cancel()
+        except Exception:
+            pass
+        self.destroy()
+        if self._on_complete:
+            self._on_complete(None)
