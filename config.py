@@ -16,7 +16,7 @@ import sys
 
 
 APP_NAME = "JustATuner"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 
 
 # Settings defaults. Anything read at runtime MUST exist here — the
@@ -53,6 +53,10 @@ DEFAULT_SETTINGS = {
         "scope_trails": 1,
         "scope_thickness": 2,
         "scope_points": 300,
+        # Most-recently-used drone sample (WAV path). Reloaded on launch
+        # when drone_type == "sample". Recordings are auto-saved into the
+        # config dir's recordings/ folder so they can persist by path too.
+        "last_sample_path": None,
     },
     # Audio input device (None = system default). Shared across tabs.
     "audio_input_device": None,

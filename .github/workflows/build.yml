@@ -47,8 +47,28 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      # GPU strobe tuner renderer (Rust/wgpu via pyo3 + maturin). Built on
+      # every platform so the shipped app gets GPU rendering; build.py's
+      # capability check bundles it, and tuner/view.py falls back to the
+      # canvas renderer at runtime if it's somehow missing.
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build GPU tuner renderer (Rust/wgpu)
+        run: |
+          pip install maturin
+          python -m maturin build --release --manifest-path tuner_renderer/Cargo.toml
+          pip install --find-links tuner_renderer/target/wheels tuner_render
+
       - name: Build with PyInstaller
         run: python build.py
+
+      - name: Verify microphone permission in Info.plist (macOS)
+        if: matrix.os == 'macos-latest'
+        run: |
+          plutil -extract NSMicrophoneUsageDescription raw \
+            dist/JustATuner.app/Contents/Info.plist
+          echo "NSMicrophoneUsageDescription present in bundle."
 
       # ---------- Windows installer (Inno Setup) ----------
       - name: Extract APP_VERSION from config.py
@@ -105,7 +125,7 @@ jobs:
       # ---------- Attach to GitHub Release ----------
       - name: Upload to Release (Linux/macOS)
         if: matrix.os != 'windows-latest' && github.event_name == 'release'
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           files: |
             dist/${{ matrix.asset_name }}
@@ -114,7 +134,7 @@ jobs:
 
       - name: Upload Windows installer to Release
         if: matrix.os == 'windows-latest' && github.event_name == 'release'
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           files: |
             dist/JustATuner-Windows-Setup-*.exe

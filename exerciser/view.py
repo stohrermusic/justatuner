@@ -7,6 +7,7 @@ tuner inside JustATuner's notebook.
 """
 
 import colorsys
+import os
 import random
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
@@ -25,6 +26,7 @@ from exerciser.intervals import (
 )
 from exerciser.engine import AudioEngine, INSTRUMENT_PRESETS, list_input_devices
 from exerciser.widgets import RoundScope
+from config import get_config_dir
 
 
 # Frame rates
@@ -169,6 +171,25 @@ class ExerciserView:
             volume=self.drone_volume,
         )
 
+        # Restore the most-recently-used drone sample, if the last session
+        # ended on sample mode and the file is still readable. Recordings
+        # live in the config dir's recordings/ folder; loaded WAVs point at
+        # wherever the user picked them. A missing/moved file falls back to
+        # the rich synth so the drone still makes sound.
+        self._current_sample_path = None
+        _saved_sample = ex.get("last_sample_path")
+        if self.drone_type == "sample":
+            if _saved_sample and os.path.exists(_saved_sample):
+                try:
+                    self.engine.load_sample_wav(_saved_sample)
+                    self._current_sample_path = _saved_sample
+                except Exception:
+                    self.drone_type = "rich"
+                    self.engine.set_drone(dtype="rich")
+            else:
+                self.drone_type = "rich"
+                self.engine.set_drone(dtype="rich")
+
         # Animation-loop bookkeeping
         self._running = False
         self._scope_after_id = None
@@ -233,6 +254,7 @@ class ExerciserView:
             "scope_trails": int(self.scope_trails.get()),
             "scope_thickness": int(self.scope_thickness.get()),
             "scope_points": int(self.scope_points.get()),
+            "last_sample_path": self._current_sample_path,
         }
 
     def populate_menu(self, menubar):
@@ -278,6 +300,8 @@ class ExerciserView:
                                 command=self._on_load_sample_wav)
         sample_menu.add_command(label="Record New...",
                                 command=self._on_record_sample)
+        sample_menu.add_command(label="Save Sample As...",
+                                command=self._on_save_sample)
         sample_menu.add_separator()
         sample_menu.add_command(label="Clear Sample (back to synth)",
                                 command=self._on_clear_sample)
@@ -695,6 +719,7 @@ class ExerciserView:
         # the local var + menu selection.
         self.drone_type = "sample"
         self._sound_var.set("sample")
+        self._current_sample_path = path
         msg = (f"Loaded {info['label']} ({info['duration_s']:.1f}s @ "
                f"{info['sr']} Hz).\n"
                f"Detected fundamental: {info['freq_hz']:.1f} Hz"
@@ -727,6 +752,19 @@ class ExerciserView:
             return  # cancelled or empty
         self.drone_type = "sample"
         self._sound_var.set("sample")
+        # Recordings are in-memory only — persist this one to the config
+        # dir so it survives a restart (reloaded via last_sample_path).
+        # Best-effort: if saving fails the sample still works this session,
+        # it just won't be remembered next launch.
+        self._current_sample_path = None
+        try:
+            rec_dir = os.path.join(get_config_dir(), "recordings")
+            os.makedirs(rec_dir, exist_ok=True)
+            rec_path = os.path.join(rec_dir, "last_recording.wav")
+            self.engine.save_sample_wav(rec_path)
+            self._current_sample_path = rec_path
+        except Exception as e:
+            print(f"Couldn't persist recording: {e}")
         msg = (f"Recorded {info['duration_s']:.1f}s.\n"
                f"Detected fundamental: {info['freq_hz']:.1f} Hz"
                + ("" if info["pitch_confident"]
@@ -738,6 +776,39 @@ class ExerciserView:
         # Engine reverts drone_type to "rich" inside clear_sample().
         self.drone_type = self.engine.drone_type
         self._sound_var.set(self.drone_type)
+        self._current_sample_path = None
+
+    def _on_save_sample(self):
+        """Export the current drone sample to a WAV of the user's choosing.
+        Works for both loaded and recorded samples."""
+        label, _freq = self.engine.sample_info()
+        if label is None:
+            messagebox.showinfo(
+                "No sample",
+                "Load or record a sample first, then save it.",
+                parent=self.root,
+            )
+            return
+        path = filedialog.asksaveasfilename(
+            title="Save drone sample as WAV",
+            defaultextension=".wav",
+            filetypes=[("WAV audio", "*.wav")],
+            parent=self.root,
+        )
+        if not path:
+            return
+        try:
+            self.engine.save_sample_wav(path)
+        except Exception as e:
+            messagebox.showerror(
+                "Couldn't save sample",
+                f"Failed to write '{path}':\n\n{e}",
+                parent=self.root,
+            )
+            return
+        # Persist from the new location going forward.
+        self._current_sample_path = path
+        messagebox.showinfo("Sample saved", f"Saved to:\n{path}", parent=self.root)
 
     def _on_voicing_changed(self):
         self.drone_voicing = self._voicing_var.get()

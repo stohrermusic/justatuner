@@ -38,6 +38,18 @@ python build.py --clean
 
 PyInstaller picks up the `tuner/`, `exerciser/`, and `audio_utils.py` packages via the import graph from `main.py` — no `--add-data` needed for source. Pillow's native libraries get bundled automatically (~5–10 MB).
 
+**GPU tuner renderer**: `build.py` adds `--hidden-import tuner_render` only when that extension is importable, so a *local* `python build.py` bundles the GPU renderer only if you've built and installed it first:
+
+```bash
+pip install maturin
+python -m maturin build --release --manifest-path tuner_renderer/Cargo.toml
+pip install --find-links tuner_renderer/target/wheels tuner_render
+```
+
+CI does this on every runner (Rust via `dtolnay/rust-toolchain@stable`). Without the extension the build is canvas-only and `tuner/view.py` falls back at runtime — which is exactly how v1.0.0 silently shipped CPU-only.
+
+**macOS microphone permission**: on macOS the build runs `_patch_macos_plist()` after PyInstaller, injecting `NSMicrophoneUsageDescription` into `dist/JustATuner.app/Contents/Info.plist`. macOS *silently* denies mic access to any app that doesn't declare it — the tuner wheels never move and the drone analyzer sees no input — and PyInstaller doesn't add the key. This mirrors SSC's `build.py`; the SSC extraction originally dropped the step (restored on `beta`). CI asserts the key is present via `plutil -extract`, so a regression fails the macOS build.
+
 ## Module Structure
 
 ```
@@ -64,6 +76,11 @@ exerciser/
   widgets.py            → RoundScope (canvas-based round CRT widget)
   view.py               → ExerciserView (drone tab UI), RecordSampleDialog,
                           all six visualizer mode draw methods
+
+tuner_renderer/         → Rust/wgpu GPU strobe renderer (pyo3 extension,
+                          built with maturin into the `tuner_render` module).
+                          tuner/view.py imports it; falls back to the canvas
+                          renderer when absent. Copied from SSC.
 
 installer.iss           → Inno Setup script for Windows installer
 .github/workflows/
@@ -112,6 +129,10 @@ Loaded WAV files and live recordings both go through `_install_sample`, which do
 ### Recording
 
 `record_start()` / `record_stop_and_use()` / `record_cancel()` work with the existing input stream — the input callback appends each frame to `_recording_chunks` while `_recording` is True. The recording UI in `RecordSampleDialog` (`exerciser/view.py`) polls `engine.recorded_duration_s()` for the elapsed counter. 1.5-second hold-off on the Stop button so an accidental double-click can't immediately abort.
+
+### Sample persistence
+
+The active drone sample survives a restart. `ExerciserView` tracks the current sample's source path in `self._current_sample_path` and writes it to `exerciser_settings["last_sample_path"]` in `save_settings()`. On construction, if the saved `drone_type` is `"sample"` and the path still exists, it reloads via `engine.load_sample_wav()`; a missing/unreadable file falls back to the `rich` synth so the drone still sounds. Loaded WAVs persist by their own path; recordings (in-memory only) are auto-saved to `<config dir>/recordings/last_recording.wav` in `_after_record` so they have a path to remember. `engine.save_sample_wav(path)` writes the current sample as 16-bit PCM mono and backs both that auto-save and the **Drone > Sample > Save Sample As...** export.
 
 ## Visualizer Modes (JI Drone tab)
 
@@ -245,9 +266,9 @@ Single workflow at `.github/workflows/build.yml`. Three matrix entries:
 - **`macos-latest`** — Apple Silicon. Same Python install, `python build.py` produces `dist/JustATuner.app`, zipped to `JustATuner-macOS.zip`.
 - **`ubuntu-latest`** — `apt-get install libportaudio2`, then build, rename to `JustATuner-Linux`.
 
-Triggers: push to `main` or `beta`, release `created`, manual `workflow_dispatch`. On release events, the `softprops/action-gh-release@v1` step attaches each platform's artifact to the release page.
+Before the PyInstaller step, all three runners install the Rust toolchain (`dtolnay/rust-toolchain@stable`) and `maturin build` the `tuner_renderer/` crate, then `pip install` the resulting `tuner_render` wheel so `build.py` bundles the GPU strobe renderer. Adds a Rust compile (~1–2 min/runner) to each build.
 
-**Action deprecation note**: `softprops/action-gh-release@v1` runs on Node 20, which GitHub is removing from runners in September 2026. Bump to `@v2` before that cutover.
+Triggers: push to `main` or `beta`, release `created`, manual `workflow_dispatch`. On release events, the `softprops/action-gh-release@v2` step attaches each platform's artifact to the release page (bumped from `@v1`, which ran on the soon-to-be-removed Node 20).
 
 ## Config File Location
 
@@ -267,7 +288,8 @@ Top-level keys: `tuner_settings` (dict), `exerciser_settings` (dict), `audio_inp
 
 - **Apple Silicon only on macOS** — `sounddevice`'s Intel wheel doesn't reliably bundle PortAudio. JustATuner is audio-only, so an Intel build with no audio isn't worth shipping. README points Intel Mac users at `brew install portaudio` + From-Source.
 - **No code signing on any platform**. Windows uses SmartScreen "Run anyway" + UAC; macOS needs `xattr -cr` to clear the quarantine flag; Linux needs `chmod +x`. README documents all three.
-- **GPU tuner renderer not bundled**. The Rust/wgpu `tuner_render` crate from SSC was deliberately not copied over for v1.0 — the canvas fallback runs fine at 60 fps and avoids the maturin + Rust toolchain on every build runner. Reasonable v1.x stretch goal if 90/120 fps becomes desirable.
+- **macOS mic permission must be declared in the bundle**. `build.py`'s `_patch_macos_plist()` adds `NSMicrophoneUsageDescription` to the `.app` Info.plist post-build; without it macOS silently denies microphone access. v1.0.0 shipped without it (an extraction regression) — fixed in v1.1.0.
+- **GPU tuner renderer is built in CI** (v1.1.0+). The Rust/wgpu `tuner_render` crate lives in `tuner_renderer/` (copied from SSC); maturin builds it on each runner and `build.py`'s `--hidden-import` capability check bundles it, with `tuner/view.py` falling back to the Tk canvas renderer when it's absent. **v1.0.0 shipped without it** — the extraction brought over the Python integration in `tuner/view.py` but not the crate or the build wiring, so end users got canvas-only while a stray local `tuner_render` install masked the gap in dev. Fixed in v1.1.0.
 
 ## Relationship to Stohrer Sax Shop Companion
 

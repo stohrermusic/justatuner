@@ -4,7 +4,7 @@
 ; shortcuts, and registers an uninstaller.
 ;
 ; Build locally (after `python build.py`):
-;   iscc /DAppVersion=1.0.0 installer.iss
+;   iscc /DAppVersion=1.1.0 installer.iss
 ;
 ; CI passes /DAppVersion automatically from config.py's APP_VERSION.
 

@@ -2,27 +2,23 @@
 
 Outstanding work, roughly prioritized. v1.0.0 shipped 2026-06-04.
 
-## Near-term (low effort, real value)
+## Near-term
 
-### Bump `softprops/action-gh-release` v1 → v2
+### Ship v1.1.0 — mic fix + GPU renderer + sample persistence + CI bump
 
-The CI workflow's release-upload step runs on Node 20, which GitHub is removing from runners in September 2026. One-line change in `.github/workflows/build.yml`:
+Four things landed on `beta` since v1.0.0; they ship together as **v1.1.0** (asap):
 
-```yaml
-uses: softprops/action-gh-release@v2  # was @v1
-```
+1. **macOS microphone fix** — v1.0.0's `.app` shipped without `NSMicrophoneUsageDescription`, so macOS silently denied mic access (tuner wheels never move, drone analyzer gets no input). The SSC extraction had dropped SSC's `_patch_macos_plist()` step; `build.py` now restores it and CI asserts the key via `plutil -extract`.
+2. **GPU strobe renderer** — *the big one.* v1.0.0 shipped CPU-only: the extraction brought `tuner/view.py`'s GPU integration but not the Rust crate or build wiring, so **every user except the dev** (who had a stray local `tuner_render` install) got the canvas fallback. Now `tuner_renderer/` is copied from SSC, maturin-built in CI on all three platforms, and bundled via `build.py`'s `--hidden-import` capability check. Verified locally: the crate builds clean (release wheel produced in 71s).
+3. **Drone sample persistence** — `exerciser_settings["last_sample_path"]` remembers the last loaded/recorded sample and reloads it on launch (falls back to the rich synth if the file is gone). Recordings auto-save to `<config dir>/recordings/last_recording.wav`; new **Drone > Sample > Save Sample As...** exports a loaded or recorded sample to a WAV.
+4. **CI `softprops/action-gh-release` v1 → v2** — Node 20 removal (Sept 2026).
 
-Two `uses:` lines to update (Windows installer upload + Linux/macOS artifact upload). After the bump, trigger a `workflow_dispatch` run (or wait for the next release) to confirm the v2 action behaves the same.
-
-### Sample drone: remember last-loaded WAV across launches
-
-Drone > Sample currently drops the loaded sample on app quit. Reasonable behavior to add:
-
-- Persist the most-recently-loaded WAV's path in `exerciser_settings["last_sample_path"]`
-- On launch, if the file still exists and the previous session had Sound = sample, auto-load it
-- Skip silently if the file is gone (user moved / deleted it) and fall back to whatever previous sound type they had
-
-Recordings (which aren't on disk) would need an extra step — saving them to a per-user config dir as `recordings/<timestamp>.wav` — if you want recorded samples to persist too.
+Release mechanics:
+- ✅ `APP_VERSION` bumped to 1.1.0 in `config.py` + `installer.iss`.
+- Write `release_notes_v1.1.0.md`.
+- README: note the macOS first-launch mic prompt (click **Allow**); mention GPU strobe rendering.
+- Merge `beta` → `main`, then `gh release create v1.1.0`.
+- Interim for mac users still on v1.0.0 (mic): launch once via an Automator "Run Shell Script" app (`nohup /Applications/JustATuner.app/Contents/MacOS/JustATuner >/dev/null 2>&1 &`) so the app inherits mic permission from the shell — or just wait for v1.1.0.
 
 ## Iterative (Garden is marked beta for a reason)
 
@@ -51,16 +47,9 @@ Open ideas from `memory/garden_visualizer.md`:
 
 ## Stretches
 
-### Port the GPU tuner renderer from SSC
+### Port the GPU tuner renderer from SSC — ✅ done on beta (v1.1.0)
 
-SSC has a Rust/wgpu `tuner_renderer/` crate that delivers 60-120fps strobe wheels via maturin-built pyo3 extension, with automatic canvas fallback. Deliberately deferred from v1.0 to keep the build matrix simple.
-
-If 90/120fps becomes desirable for JustATuner (most people won't care — canvas mode runs fine on any laptop), the port involves:
-
-1. Copy `tuner_renderer/` from SSC verbatim
-2. Add `pip install maturin` + Rust toolchain install steps to `.github/workflows/build.yml` for the platforms you want to build it on
-3. Maturin-build the wheel and `pip install` it before `python build.py` runs, so PyInstaller picks it up
-4. Confirm the `import tuner_render` try/except in `tuner/view.py` correctly falls back to canvas when the extension isn't installed
+`tuner_renderer/` copied from SSC (8 source files), Rust toolchain + maturin build added to all three CI runners, bundled via `build.py`'s `--hidden-import tuner_render` capability check, with the canvas fallback in `tuner/view.py` intact. Crate verified to build locally. See the v1.1.0 item at the top.
 
 ### Phase vocoder for the WAV-sample drone
 
