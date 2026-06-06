@@ -18,6 +18,36 @@ import sys
 APP_NAME = "JustATuner"
 
 
+def _patch_macos_plist():
+    """Add microphone permission to the macOS .app Info.plist.
+
+    macOS silently denies mic access to apps that don't declare
+    NSMicrophoneUsageDescription in their Info.plist — the tuner wheels
+    never move and the drone analyzer sees no input. PyInstaller doesn't
+    add the key, so patch the built bundle. (Ported from Stohrer Sax Shop
+    Companion, which has shipped this fix since v2.x.)
+    """
+    import plistlib
+
+    plist_path = os.path.join("dist", f"{APP_NAME}.app", "Contents", "Info.plist")
+    if not os.path.exists(plist_path):
+        print(f"Warning: {plist_path} not found, skipping plist patch")
+        return
+
+    with open(plist_path, "rb") as f:
+        plist = plistlib.load(f)
+
+    plist["NSMicrophoneUsageDescription"] = (
+        "JustATuner uses the microphone to detect pitch for tuning "
+        "and to analyze intervals against the drone."
+    )
+
+    with open(plist_path, "wb") as f:
+        plistlib.dump(plist, f)
+
+    print("  Added NSMicrophoneUsageDescription to Info.plist")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--clean", action="store_true",
@@ -51,13 +81,31 @@ def main():
         "--noconfirm",
     ]
     if sys.platform == "darwin":
-        cmd.append("--windowed")
+        cmd.extend([
+            "--windowed",
+            "--osx-bundle-identifier", "com.stohrer.justatuner",
+        ])
     else:
         cmd.extend(["--onefile", "--noconsole"])
+
+    # GPU-accelerated tuner renderer (Rust/wgpu via pyo3). Bundled only
+    # when the tuner_render extension is importable at build time —
+    # otherwise the app ships canvas-only and the tuner falls back at
+    # runtime. Mirrors the capability check SSC's build.py uses.
+    try:
+        import tuner_render  # noqa: F401  (capability check)
+        cmd.extend(["--hidden-import", "tuner_render"])
+        print("  tuner_render found — including GPU strobe renderer")
+    except ImportError:
+        print("  tuner_render not found — tuner will use CPU canvas rendering")
+
     cmd.append("main.py")
 
     print(" ".join(cmd))
     subprocess.check_call(cmd)
+
+    if sys.platform == "darwin":
+        _patch_macos_plist()
 
 
 if __name__ == "__main__":

@@ -482,6 +482,24 @@ class AudioEngine:
                 return (None, None)
             return (self._drone_sample_label, self._drone_sample_freq)
 
+    def save_sample_wav(self, path):
+        """Write the current drone sample to a 16-bit PCM mono WAV at
+        ``path``. Backs both the user's "Save Sample As..." export and the
+        persistence of recordings (which are otherwise in-memory only) so
+        the last sample can be reloaded next launch. Raises ValueError if
+        no sample is loaded, OSError if the file can't be written."""
+        with self._sample_lock:
+            if self._drone_sample is None:
+                raise ValueError("No sample loaded to save.")
+            sample = self._drone_sample.copy()
+            sr = int(self._drone_sample_sr or self.sr)
+        pcm16 = (np.clip(sample, -1.0, 1.0) * 32767.0).astype("<i2")
+        with wave.open(path, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(sr)
+            w.writeframes(pcm16.tobytes())
+
     def _install_sample(self, sample, sr, label):
         """Process raw audio into a loopable drone sample, detect its
         pitch, and swap it in. Holds the sample lock only briefly so
