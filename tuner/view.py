@@ -418,6 +418,17 @@ class TunerView:
         app can persist it on close."""
         self._tuner_save_settings()
 
+    def populate_menu(self, menubar):
+        """Add the Tuner menu to the host menubar while the tuner tab is
+        active (mirrors how SSC wires this). The Settings... dialog holds
+        stripe/faceplate color, ring + overall brightness, octave boost,
+        the input-device picker, and the on-screen FPS toggle — none of
+        which are inline, so without this entry they're unreachable."""
+        tuner_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Tuner", menu=tuner_menu)
+        tuner_menu.add_command(label="Settings...",
+                               command=self._tuner_open_settings)
+
     def _init_tuner_state(self):
         """Initialize tuner state. Called from __init__."""
         self._tuner_engine = None

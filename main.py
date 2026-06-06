@@ -141,7 +141,10 @@ class JustATunerApp:
         new_menubar.add_cascade(label="File", menu=file_menu)
         file_menu.add_command(label="Quit", command=self._on_close)
 
-        if not is_tuner and hasattr(self.exerciser, "populate_menu"):
+        if is_tuner:
+            if hasattr(self.tuner, "populate_menu"):
+                self.tuner.populate_menu(new_menubar)
+        elif hasattr(self.exerciser, "populate_menu"):
             self.exerciser.populate_menu(new_menubar)
 
         help_menu = tk.Menu(new_menubar, tearoff=0)

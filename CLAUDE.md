@@ -94,7 +94,7 @@ installer.iss           → Inno Setup script for Windows installer
 
 **Tab-aware audio**: only the active notebook tab's engine has an open sounddevice InputStream. `main.py`'s `_on_tab_changed` stops one and starts the other. Critical because the OS sometimes refuses two concurrent opens on the same input device on macOS.
 
-**Tab-specific menus**: each tab rebuilds the menubar when it becomes active. The exerciser contributes Drone / Exerciser Options menus while it's the active tab; the tuner contributes nothing right now (its settings are all inline sliders).
+**Tab-specific menus**: each tab rebuilds the menubar when it becomes active. The exerciser contributes Drone / Exerciser Options menus; the tuner contributes a **Tuner** menu whose **Settings…** entry opens `_tuner_open_settings` (stripe/faceplate color, ring + overall brightness, octave boost, input-device picker, on-screen FPS toggle). Some tuner controls are also inline (sensitivity, reference pitch, transposition, waveform). The Tuner menu's wiring was missing until v1.1.x — the dialog existed but nothing opened it (an extraction gap).
 
 **Settings persistence**: `config.load_settings()` does a two-level deep merge with `DEFAULT_SETTINGS` so old config files survive new keys being added. Save happens on app close in `JustATunerApp._on_close` via both views' `save_settings()` methods.
 
@@ -224,7 +224,7 @@ App opens **maximized** on every platform: `state('zoomed')` on Windows, `attrib
 
 ## Tab-Specific Menu
 
-`main.py`'s `_rebuild_menubar(is_tuner)` builds a fresh menubar on every tab change. Both views expose `populate_menu(menubar)` if they have menus to contribute (only the exerciser does right now).
+`main.py`'s `_rebuild_menubar(is_tuner)` builds a fresh menubar on every tab change. Both views expose `populate_menu(menubar)` to contribute their tab's menus — Tuner ▸ Settings… for the tuner, Drone / Exerciser Options for the exerciser.
 
 ## Branching Strategy
 
