@@ -398,8 +398,22 @@ class AudioEngine:
             idx_float = (pos + rate * np.arange(frames)) % N
             i0 = idx_float.astype(np.int64)
             frac = idx_float - i0
+            # Catmull-Rom cubic interpolation (4-tap) instead of 2-tap
+            # linear — much less harsh when a sample is pitched well away
+            # from its source pitch (loading arbitrary WAVs at any octave).
+            # The mod-N taps ride across the loop boundary, which
+            # _install_sample already crossfaded smooth.
+            im1 = (i0 - 1) % N
             i1 = (i0 + 1) % N
-            voice = sample[i0] * (1.0 - frac) + sample[i1] * frac
+            i2 = (i0 + 2) % N
+            y0 = sample[im1]
+            y1 = sample[i0]
+            y2 = sample[i1]
+            y3 = sample[i2]
+            a0 = -0.5 * y0 + 1.5 * y1 - 1.5 * y2 + 0.5 * y3
+            a1 = y0 - 2.5 * y1 + 2.0 * y2 - 0.5 * y3
+            a2 = -0.5 * y0 + 0.5 * y2
+            voice = ((a0 * frac + a1) * frac + a2) * frac + y1
             signal += amps[v] * voice
             phases[v] = (pos + rate * frames) % N
 
