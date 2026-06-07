@@ -11,6 +11,8 @@ get the same per-user persistence story.
 
 import copy
 import json
+import logging
+import logging.handlers
 import os
 import sys
 
@@ -80,6 +82,36 @@ def get_config_dir():
 
 
 SETTINGS_FILE = os.path.join(get_config_dir(), "app_settings.json")
+LOG_FILE = os.path.join(get_config_dir(), "app.log")
+
+
+def setup_logging():
+    """Set up rotating file logging for crash/error diagnostics.
+
+    Writes ``app.log`` to the config dir (rotates at 500KB, keeps 1 backup).
+    Without this, diagnostics are invisible in the shipped app: it's built
+    --windowed/--noconsole so print()/stderr go nowhere, and Tk silently
+    swallows exceptions raised inside callbacks. Returns the log file path.
+    """
+    logger = logging.getLogger()
+    logger.setLevel(logging.WARNING)
+    # Idempotent — don't stack handlers if this is called more than once.
+    if any(isinstance(h, logging.handlers.RotatingFileHandler)
+           for h in logger.handlers):
+        return LOG_FILE
+    handler = logging.handlers.RotatingFileHandler(
+        LOG_FILE, maxBytes=500_000, backupCount=1, encoding="utf-8")
+    handler.setFormatter(logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S"))
+    logger.addHandler(handler)
+    logging.warning("App starting — version %s", APP_VERSION)
+    return LOG_FILE
+
+
+def get_log_file():
+    """Path to the diagnostic log file (may not exist until setup_logging)."""
+    return LOG_FILE
 
 
 def load_settings():
