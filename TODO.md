@@ -4,21 +4,24 @@ Outstanding work, roughly prioritized. v1.0.0 shipped 2026-06-04.
 
 ## Near-term
 
-### Ship v1.1.0 — mic fix + GPU renderer + sample persistence + CI bump
+### v1.1.0 — shipped 2026-06-06
 
-Four things landed on `beta` since v1.0.0; they ship together as **v1.1.0** (asap):
+Four things shipped together in **v1.1.0** (binaries on the [release page](https://github.com/stohrermusic/justatuner/releases/tag/v1.1.0)):
 
 1. **macOS microphone fix** — v1.0.0's `.app` shipped without `NSMicrophoneUsageDescription`, so macOS silently denied mic access (tuner wheels never move, drone analyzer gets no input). The SSC extraction had dropped SSC's `_patch_macos_plist()` step; `build.py` now restores it and CI asserts the key via `plutil -extract`.
 2. **GPU strobe renderer** — *the big one.* v1.0.0 shipped CPU-only: the extraction brought `tuner/view.py`'s GPU integration but not the Rust crate or build wiring, so **every user except the dev** (who had a stray local `tuner_render` install) got the canvas fallback. Now `tuner_renderer/` is copied from SSC, maturin-built in CI on all three platforms, and bundled via `build.py`'s `--hidden-import` capability check. Verified locally: the crate builds clean (release wheel produced in 71s).
 3. **Drone sample persistence** — `exerciser_settings["last_sample_path"]` remembers the last loaded/recorded sample and reloads it on launch (falls back to the rich synth if the file is gone). Recordings auto-save to `<config dir>/recordings/last_recording.wav`; new **Drone > Sample > Save Sample As...** exports a loaded or recorded sample to a WAV.
 4. **CI `softprops/action-gh-release` v1 → v2** — Node 20 removal (Sept 2026).
 
-Release mechanics:
-- ✅ `APP_VERSION` bumped to 1.1.0 in `config.py` + `installer.iss`.
-- Write `release_notes_v1.1.0.md`.
-- README: note the macOS first-launch mic prompt (click **Allow**); mention GPU strobe rendering.
-- Merge `beta` → `main`, then `gh release create v1.1.0`.
-- Interim for mac users still on v1.0.0 (mic): launch once via an Automator "Run Shell Script" app (`nohup /Applications/JustATuner.app/Contents/MacOS/JustATuner >/dev/null 2>&1 &`) so the app inherits mic permission from the shell — or just wait for v1.1.0.
+✅ Released: `APP_VERSION` 1.1.0, release notes written, merged `beta` → `main`, all three platform binaries attached. CI caught (and we fixed) a Linux-only `libx11-dev` link gap on the first `beta` push, before the release.
+
+### v1.1.1 — accumulating on `beta` (not yet released)
+
+More extraction-gap fixes + polish landed on `beta` after v1.1.0. To ship: bump `APP_VERSION` → 1.1.1, write `release_notes_v1.1.1.md`, merge `beta` → `main`, `gh release create v1.1.1`.
+
+- **Tuner Settings menu** — `_tuner_open_settings` (stripe/faceplate color, brightness, octave boost, input-device picker, on-screen FPS toggle) existed but nothing opened it; the extraction dropped SSC's `Tuner > Settings...` menu wiring. Now wired via `TunerView.populate_menu()`.
+- **Error logging** — rotating `app.log` + `sys.excepthook` + Tk `report_callback_exception` + Help > Open Log File. Another SSC-parity gap: the app ships `--windowed`, so prints went nowhere and Tk swallowed callback exceptions, leaving user crashes untraceable. (Catches Python errors, not native wgpu/Metal crashes — those need the OS crash report.)
+- **Drone sample: cubic interpolation** — Catmull-Rom 4-tap replaces linear in `_render_sample_voices` for cleaner pitch-shifting. Increment 1 of the sample-quality work (see "Sample pitch-shifting quality" under Stretches).
 
 ## Iterative (Garden is marked beta for a reason)
 
@@ -51,11 +54,28 @@ Open ideas from `memory/garden_visualizer.md`:
 
 `tuner_renderer/` copied from SSC (8 source files), Rust toolchain + maturin build added to all three CI runners, bundled via `build.py`'s `--hidden-import tuner_render` capability check, with the canvas fallback in `tuner/view.py` intact. Crate verified to build locally. See the v1.1.0 item at the top.
 
-### Phase vocoder for the WAV-sample drone
+### Sample pitch-shifting quality — octave mipmaps (researched 2026-06-09, deferred)
 
-Currently sample resampling is linear interpolation — clean within ~one octave of source, but starts aliasing beyond that. A phase vocoder would decouple pitch from playback rate so you could drone a sample-recorded G3 in C5 without chipmunk artifacts.
+**Problem.** `_render_sample_voices` resamples each drone voice by advancing a float playhead at `rate = (target_freq / sample_freq) * (sample_sr / output_sr)`. Beyond ~an octave from the source pitch this degrades two ways: (1) **aliasing** on upward shifts — the interpolator is a weak anti-alias filter, so partials above the new Nyquist fold back; (2) the natural **formant / "chipmunk" shift**. The use case that makes this matter: users loading **arbitrary existing WAV files** and droning them at **any octave** (not just tones recorded near the drone pitch).
 
-Discussed in v1.0 design pass and **deliberately deferred** as overkill for the drone use case (users record near the middle of their intended drone range and stay within an octave). Revisit only if real users hit the limitation.
+**Already done (v1.1.x, `beta` — commit `095afc0`).** Swapped 2-tap linear interpolation for 4-tap **Catmull-Rom cubic** in `_render_sample_voices`. Removes interpolation grit everywhere; cleanly handles down-shifts and modest shifts. Does *not* anti-alias large upward shifts — cubic is a better interpolator, not an anti-alias filter.
+
+**Approaches weighed and rejected:**
+- **Phase vocoder** — the reflexive answer, but wrong here. It decouples pitch from *duration*, which is irrelevant for a looping drone. A vanilla PV still chipmunks (formants move with pitch); formant-preserving PV is the hard part — real-time multi-voice FFT, phase coherence, transient/loop handling. Multi-day, artifact-prone. No.
+- **Additive / harmonic resynthesis** — would reuse the `rich`-synth oscillator bank, gives exact pitch with zero aliasing and optional formant hold. BUT it assumes a clean *harmonic* tone; it would wreck arbitrary/noisy/inharmonic WAVs (pads, voices, field recordings) by collapsing them to a buzzy harmonic series. Wrong for the "any WAV" use case. No.
+- **Formant preservation in general** — *not wanted.* Deliberately pitching a sample and hearing its timbre move is normal, expected sampler behavior — part of the fun. The actual defect is digital aliasing, not the formant shift.
+
+**Chosen direction (if revisited): octave mipmaps** — the standard hardware-sampler technique. Anti-aliased resampling that preserves the sample's real character (no synthesis). ≈ **half a day, moderate, low-risk** — the heavy work is offline at load, so the audio callback stays cheap.
+
+1. **Build the pyramid (offline, in `_install_sample`):** ~3–4 levels, each = previous level low-passed then downsampled 2×. Lowpass = windowed-sinc FIR via `np.convolve` (no scipy needed). Two subtleties: filter **circularly** so the seamless loop survives each level, and carry the existing loop crossfade down each level. Memory ≈ 2× the sample (levels halve).
+2. **Pick the level per voice (real-time, in `_render_sample_voices`):** `level = clamp(floor(log2(rate)), 0, maxlevel)`. Upshifts read an already-band-limited copy; downshifts use level 0. ~3 lines.
+3. **Refactor the playhead — the key trick:** store each voice's playhead as a **normalized phase in [0, 1)** (fraction of the loop), not an absolute sample index. Then advance-per-output-sample = `rate / N_original` (**level-independent**), and read index at level L = `phase × len(level_L)`. That makes switching levels mid-note seamless. ~20–30 line rewrite of the render loop.
+
+**Risks (all manageable):** lowpass quality (too weak → no benefit; too strong → dull samples); keeping the loop seamless at every level (circular filtering + the existing crossfade); clean transitions when a voice crosses a level boundary (the normalized phase handles it; an inter-level crossfade — "trilinear" style — is available if ever needed, but a drone won't need it).
+
+**Verify when built:** before/after **spectral check** on an up-shifted render (high-frequency energy above the fundamental's harmonics should drop vs cubic-only) — not just "it runs"; plus seamless level transitions (no clicks as `rate` crosses a boundary) and no loop regressions (finite/bounded, still seamless).
+
+**Do we need it?** Only matters for large *upward* shifts. Cubic already nails down-shifts and modest shifts. Worth the half-day if users pitch arbitrary WAVs up a lot (the stated use case); skippable if they mostly stay near or below source pitch.
 
 ## Done in v1.0.0
 
