@@ -53,8 +53,11 @@ CI does this on the Windows and Linux runners (Rust via `dtolnay/rust-toolchain@
 ## Module Structure
 
 ```
-main.py                 → Tk root + two-tab Notebook + on_tab_changed engine swap
-config.py               → DEFAULT_SETTINGS, settings I/O, per-platform config dir
+main.py                 → Tk root + two-tab Notebook + on_tab_changed engine
+                          swap; exception hooks (sys.excepthook + Tk
+                          report_callback_exception → app.log + error dialog)
+config.py               → DEFAULT_SETTINGS, settings I/O, per-platform config
+                          dir, setup_logging() (rotating app.log)
 audio_utils.py          → AudioRingBuffer (shared by both audio engines)
 user_guide.py           → Help > User Guide content + window
 build.py                → PyInstaller wrapper
@@ -100,6 +103,8 @@ installer.iss           → Inno Setup script for Windows installer
 
 **Settings persistence**: `config.load_settings()` does a two-level deep merge with `DEFAULT_SETTINGS` so old config files survive new keys being added. Save happens on app close in `JustATunerApp._on_close` via both views' `save_settings()` methods.
 
+**Error logging**: `config.setup_logging()` writes a rotating `app.log` (500KB, 1 backup) to the config dir. `main.py` wires both `sys.excepthook` and Tk's `report_callback_exception` to `_handle_exception`, which logs the full traceback and shows a dialog pointing at **Help > Open Log File**. The shipped app is `--windowed`/`--noconsole`, so `print()` goes nowhere — use `logging` for anything diagnostic. Native crashes (e.g. in a GPU driver) bypass all of this; those need the OS crash report.
+
 ## Audio Engines
 
 ### Tuner engine (`tuner/engine.py`)
@@ -116,7 +121,7 @@ Drone synthesizer + mic input + pitch detection in one class. `_rebuild_oscillat
 - **rich**: one oscillator per voice plus 8 harmonics each (decreasing amplitude)
 - **sample**: one playhead per voice through the loaded `_drone_sample` buffer
 
-For sample mode, `_render_sample_voices` runs in the audio callback and per-voice computes the playback rate as `(target_freq / sample_freq) * (sample_sr / output_sr)`, advances a float playhead through the sample buffer with wrap, linear-interpolates between adjacent samples, sums all voices, normalizes.
+For sample mode, `_render_sample_voices` runs in the audio callback and per-voice computes the playback rate as `(target_freq / sample_freq) * (sample_sr / output_sr)`, advances a float playhead through the sample buffer with wrap, interpolates with a Catmull-Rom cubic (4-tap; taps wrap mod-N across the crossfaded loop boundary), sums all voices, normalizes. Was 2-tap linear before v1.1.1 — cubic is audibly cleaner when a sample is pitched well away from its source note.
 
 ### WAV-sample drone (`_install_sample` in `exerciser/engine.py`)
 
