@@ -183,15 +183,26 @@ class AudioEngine:
             self._output_stream = None
 
     def stop(self):
-        """Stop and close audio streams."""
+        """Stop and close audio streams.
+
+        stop()/close() can raise PortAudioError if the device vanished
+        (Bluetooth disconnect is the common case) — swallow it so a tab
+        switch or app close still completes. Mirrors TunerEngine.stop().
+        """
         self.running = False
         if self._input_stream is not None:
-            self._input_stream.stop()
-            self._input_stream.close()
+            try:
+                self._input_stream.stop()
+                self._input_stream.close()
+            except Exception:
+                pass
             self._input_stream = None
         if self._output_stream is not None:
-            self._output_stream.stop()
-            self._output_stream.close()
+            try:
+                self._output_stream.stop()
+                self._output_stream.close()
+            except Exception:
+                pass
             self._output_stream = None
 
     def set_input_device(self, device_index):

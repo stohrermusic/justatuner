@@ -50,13 +50,17 @@ jobs:
           pip install -r requirements.txt
 
       # GPU strobe tuner renderer (Rust/wgpu via pyo3 + maturin). Built on
-      # every platform so the shipped app gets GPU rendering; build.py's
-      # capability check bundles it, and tuner/view.py falls back to the
-      # canvas renderer at runtime if it's somehow missing.
+      # Windows and Linux; build.py's capability check bundles it, and
+      # tuner/view.py falls back to the canvas renderer at runtime if it's
+      # somehow missing. Not built on macOS: Tk Aqua's winfo_id() is not
+      # an NSView, so wgpu can't attach a surface there — Macs are
+      # canvas-only by design (see tuner/view.py).
       - name: Install Rust toolchain
+        if: matrix.os != 'macos-latest'
         uses: dtolnay/rust-toolchain@stable
 
       - name: Build GPU tuner renderer (Rust/wgpu)
+        if: matrix.os != 'macos-latest'
         run: |
           pip install maturin
           python -m maturin build --release --manifest-path tuner_renderer/Cargo.toml

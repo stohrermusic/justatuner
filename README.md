@@ -13,7 +13,7 @@ A free cross-platform desktop tuner for musicians by [Matt Stohrer](https://www.
 A 12-wheel stroboscopic chromatic tuner. Each pitch class gets its own wheel; play a note and the wheel for that note stands still, drifting right when you're sharp and left when you're flat. The faster the drift, the further out of tune. Locked = perfectly in tune.
 
 - 12 chromatic wheels, each with seven concentric rings — one ring per octave, lit by real spectral data so the played octave reads sharp and bright while the rest sit dim
-- GPU-accelerated rendering via Rust/wgpu — 60–120 fps on capable machines (release builds bundle it; automatic fallback to canvas rendering when a machine can't initialize the GPU)
+- GPU-accelerated rendering via Rust/wgpu on Windows and Linux — 60–120 fps on capable machines (release builds bundle it; automatic fallback to canvas rendering when a machine can't initialize the GPU). macOS uses the canvas renderer — Tk on macOS doesn't expose a native view wgpu can draw into.
 - Per-pitch-class phase tracking with temporal smoothing
 - Vintage backlit VU meter showing the closest pitch class and cents off
 - Configurable reference pitch (A=440, 441, 442, etc.) and transposition (Concert, B♭, E♭, F)

@@ -56,6 +56,13 @@ class JustATunerApp:
         self.root.minsize(960, 620)
         self._maximize_window()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        # WM_DELETE_WINDOW only covers the window close button. On macOS,
+        # Cmd-Q and the app menu's Quit go through Tk's ::tk::mac::Quit
+        # handler, whose default exits the process without running
+        # _on_close — settings would silently never save. Route it
+        # through the same close path.
+        if sys.platform == "darwin":
+            self.root.createcommand("::tk::mac::Quit", self._on_close)
 
         # Notebook + tabs
         self.notebook = ttk.Notebook(self.root)
