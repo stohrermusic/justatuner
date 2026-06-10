@@ -89,6 +89,8 @@ This strips the quarantine flag macOS adds to downloaded files, which is what tr
 
 When you first open JustATuner, macOS will ask for **microphone access** — click **OK / Allow**. The tuner and drone both listen to your mic to detect pitch, so the wheels won't move if you decline. (You can re-enable it later under System Settings → Privacy & Security → Microphone.)
 
+**Note:** on macOS the strobe tuner is **not GPU-accelerated** — it uses the CPU canvas renderer. The windowing toolkit (Tk) doesn't expose a native view on macOS that the GPU renderer can draw into. The tuner is fully functional, just capped at canvas frame rates; Windows and Linux get the GPU renderer.
+
 ### Linux
 
 The audio engines depend on PortAudio. Install it with:
