@@ -13,7 +13,7 @@ A free cross-platform desktop tuner for musicians by [Matt Stohrer](https://www.
 A 12-wheel stroboscopic chromatic tuner. Each pitch class gets its own wheel; play a note and the wheel for that note stands still, drifting right when you're sharp and left when you're flat. The faster the drift, the further out of tune. Locked = perfectly in tune.
 
 - 12 chromatic wheels, each with seven concentric rings — one ring per octave, lit by real spectral data so the played octave reads sharp and bright while the rest sit dim
-- GPU-accelerated rendering via Rust/wgpu — 60–120 fps on capable machines (release builds bundle it; automatic fallback to canvas rendering when a machine can't initialize the GPU)
+- GPU-accelerated rendering via Rust/wgpu on Windows and Linux — 60–120 fps on capable machines (release builds bundle it; automatic fallback to canvas rendering when a machine can't initialize the GPU). macOS uses the canvas renderer — Tk on macOS doesn't expose a native view wgpu can draw into.
 - Per-pitch-class phase tracking with temporal smoothing
 - Vintage backlit VU meter showing the closest pitch class and cents off
 - Configurable reference pitch (A=440, 441, 442, etc.) and transposition (Concert, B♭, E♭, F)
@@ -88,6 +88,8 @@ Apple charges developers $100 a year to sign apps, which I am not paying for a f
 This strips the quarantine flag macOS adds to downloaded files, which is what triggers both warnings. The same command works on every macOS version.
 
 When you first open JustATuner, macOS will ask for **microphone access** — click **OK / Allow**. The tuner and drone both listen to your mic to detect pitch, so the wheels won't move if you decline. (You can re-enable it later under System Settings → Privacy & Security → Microphone.)
+
+**Note:** on macOS the strobe tuner is **not GPU-accelerated** — it uses the CPU canvas renderer. The windowing toolkit (Tk) doesn't expose a native view on macOS that the GPU renderer can draw into. The tuner is fully functional, just capped at canvas frame rates; Windows and Linux get the GPU renderer.
 
 ### Linux
 

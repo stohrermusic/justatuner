@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 JustATuner is a free cross-platform desktop tuner for musicians by [Matt Stohrer](https://www.StohrerMusic.com). Two tools in one Tk window:
 
-- **Stroboscopic Tuner** — a 12-wheel chromatic strobe-style tuner, extracted from [Stohrer Sax Shop Companion][ssc] where it grew up in real saxophone repair shops. Optional Rust/wgpu GPU renderer falls back to a Tk canvas everywhere.
+- **Stroboscopic Tuner** — a 12-wheel chromatic strobe-style tuner, extracted from [Stohrer Sax Shop Companion][ssc] where it grew up in real saxophone repair shops. Optional Rust/wgpu GPU renderer on Windows/Linux, with Tk canvas fallback; macOS is canvas-only (Tk Aqua has no per-widget NSView for wgpu to draw into).
 - **Just Intonation Drone** — drone synthesizer (sine / rich / WAV sample) with live JI interval analysis and six visualizer modes including a Geiss-style waterfall and an audio-driven branching garden. Originally the [JustATone][jat] Python prototype, preserved here after that project pivoted to a Rust/bevy generative-art garden.
 
 [ssc]: https://github.com/stohrermusic/Stohrer-Sax-Shop-Companion
@@ -46,7 +46,7 @@ python -m maturin build --release --manifest-path tuner_renderer/Cargo.toml
 pip install --find-links tuner_renderer/target/wheels tuner_render
 ```
 
-CI does this on every runner (Rust via `dtolnay/rust-toolchain@stable`). Without the extension the build is canvas-only and `tuner/view.py` falls back at runtime — which is exactly how v1.0.0 silently shipped CPU-only.
+CI does this on the Windows and Linux runners (Rust via `dtolnay/rust-toolchain@stable`); the macOS runner skips it because macOS is canvas-only (see Per-Platform Constraints). Without the extension the build is canvas-only and `tuner/view.py` falls back at runtime — which is exactly how v1.0.0 silently shipped CPU-only.
 
 **macOS microphone permission**: on macOS the build runs `_patch_macos_plist()` after PyInstaller, injecting `NSMicrophoneUsageDescription` into `dist/JustATuner.app/Contents/Info.plist`. macOS *silently* denies mic access to any app that doesn't declare it — the tuner wheels never move and the drone analyzer sees no input — and PyInstaller doesn't add the key. This mirrors SSC's `build.py`; the SSC extraction originally dropped the step (restored on `beta`). CI asserts the key is present via `plutil -extract`, so a regression fails the macOS build.
 
@@ -79,8 +79,10 @@ exerciser/
 
 tuner_renderer/         → Rust/wgpu GPU strobe renderer (pyo3 extension,
                           built with maturin into the `tuner_render` module).
-                          tuner/view.py imports it; falls back to the canvas
-                          renderer when absent. Copied from SSC.
+                          tuner/view.py imports it on Windows/Linux; falls
+                          back to the canvas renderer when absent. Never
+                          imported on macOS (winfo_id() is not an NSView —
+                          see Per-Platform Constraints). Copied from SSC.
 
 installer.iss           → Inno Setup script for Windows installer
 .github/workflows/
@@ -94,7 +96,7 @@ installer.iss           → Inno Setup script for Windows installer
 
 **Tab-aware audio**: only the active notebook tab's engine has an open sounddevice InputStream. `main.py`'s `_on_tab_changed` stops one and starts the other. Critical because the OS sometimes refuses two concurrent opens on the same input device on macOS.
 
-**Tab-specific menus**: each tab rebuilds the menubar when it becomes active. The exerciser contributes Drone / Exerciser Options menus while it's the active tab; the tuner contributes nothing right now (its settings are all inline sliders).
+**Tab-specific menus**: each tab rebuilds the menubar when it becomes active. The exerciser contributes Drone / Exerciser Options menus; the tuner contributes a **Tuner** menu whose **Settings…** entry opens `_tuner_open_settings` (stripe/faceplate color, ring + overall brightness, octave boost, input-device picker, on-screen FPS toggle). Some tuner controls are also inline (sensitivity, reference pitch, transposition, waveform). The Tuner menu's wiring was missing until v1.1.x — the dialog existed but nothing opened it (an extraction gap).
 
 **Settings persistence**: `config.load_settings()` does a two-level deep merge with `DEFAULT_SETTINGS` so old config files survive new keys being added. Save happens on app close in `JustATunerApp._on_close` via both views' `save_settings()` methods.
 
@@ -224,7 +226,7 @@ App opens **maximized** on every platform: `state('zoomed')` on Windows, `attrib
 
 ## Tab-Specific Menu
 
-`main.py`'s `_rebuild_menubar(is_tuner)` builds a fresh menubar on every tab change. Both views expose `populate_menu(menubar)` if they have menus to contribute (only the exerciser does right now).
+`main.py`'s `_rebuild_menubar(is_tuner)` builds a fresh menubar on every tab change. Both views expose `populate_menu(menubar)` to contribute their tab's menus — Tuner ▸ Settings… for the tuner, Drone / Exerciser Options for the exerciser.
 
 ## Branching Strategy
 
@@ -266,7 +268,7 @@ Single workflow at `.github/workflows/build.yml`. Three matrix entries:
 - **`macos-latest`** — Apple Silicon. Same Python install, `python build.py` produces `dist/JustATuner.app`, zipped to `JustATuner-macOS.zip`.
 - **`ubuntu-latest`** — `apt-get install libportaudio2`, then build, rename to `JustATuner-Linux`.
 
-Before the PyInstaller step, all three runners install the Rust toolchain (`dtolnay/rust-toolchain@stable`) and `maturin build` the `tuner_renderer/` crate, then `pip install` the resulting `tuner_render` wheel so `build.py` bundles the GPU strobe renderer. Adds a Rust compile (~1–2 min/runner) to each build.
+Before the PyInstaller step, the Windows and Linux runners install the Rust toolchain (`dtolnay/rust-toolchain@stable`) and `maturin build` the `tuner_renderer/` crate, then `pip install` the resulting `tuner_render` wheel so `build.py` bundles the GPU strobe renderer. Adds a Rust compile (~1–2 min/runner) to those builds. The macOS runner skips the Rust steps entirely — macOS is canvas-only (see Per-Platform Constraints).
 
 Triggers: push to `main` or `beta`, release `created`, manual `workflow_dispatch`. On release events, the `softprops/action-gh-release@v2` step attaches each platform's artifact to the release page (bumped from `@v1`, which ran on the soon-to-be-removed Node 20).
 
@@ -289,7 +291,9 @@ Top-level keys: `tuner_settings` (dict), `exerciser_settings` (dict), `audio_inp
 - **Apple Silicon only on macOS** — `sounddevice`'s Intel wheel doesn't reliably bundle PortAudio. JustATuner is audio-only, so an Intel build with no audio isn't worth shipping. README points Intel Mac users at `brew install portaudio` + From-Source.
 - **No code signing on any platform**. Windows uses SmartScreen "Run anyway" + UAC; macOS needs `xattr -cr` to clear the quarantine flag; Linux needs `chmod +x`. README documents all three.
 - **macOS mic permission must be declared in the bundle**. `build.py`'s `_patch_macos_plist()` adds `NSMicrophoneUsageDescription` to the `.app` Info.plist post-build; without it macOS silently denies microphone access. v1.0.0 shipped without it (an extraction regression) — fixed in v1.1.0.
-- **GPU tuner renderer is built in CI** (v1.1.0+). The Rust/wgpu `tuner_render` crate lives in `tuner_renderer/` (copied from SSC); maturin builds it on each runner and `build.py`'s `--hidden-import` capability check bundles it, with `tuner/view.py` falling back to the Tk canvas renderer when it's absent. **v1.0.0 shipped without it** — the extraction brought over the Python integration in `tuner/view.py` but not the crate or the build wiring, so end users got canvas-only while a stray local `tuner_render` install masked the gap in dev. Fixed in v1.1.0.
+- **GPU tuner renderer is built in CI** (v1.1.0+), **Windows and Linux only**. The Rust/wgpu `tuner_render` crate lives in `tuner_renderer/` (copied from SSC); maturin builds it on those runners and `build.py`'s `--hidden-import` capability check bundles it, with `tuner/view.py` falling back to the Tk canvas renderer when it's absent. **v1.0.0 shipped without it** — the extraction brought over the Python integration in `tuner/view.py` but not the crate or the build wiring, so end users got canvas-only while a stray local `tuner_render` install masked the gap in dev. Fixed in v1.1.0.
+- **macOS is canvas-only — never load `tuner_render` on darwin.** Tk Aqua draws all widgets into a single NSView per toplevel, and `winfo_id()` returns an internal `MacDrawable` pointer ("the value has no meaning outside Tk" — Tk docs), not an NSView. `tuner_renderer/src/platform.rs` treats the handle as an NSView, so wgpu's Metal backend segfaults in `objc_msgSend` during surface creation — a native crash the Python `except` fallback in `tuner/view.py` can never catch. Three layers enforce this: `tuner/view.py` skips the `tuner_render` import on darwin, `build.py` skips the `--hidden-import` on darwin, and CI skips the Rust build on the macOS runner. The v1.1.0 macOS zip shipped with the renderer bundled and likely crashed at launch. Even a real NSView wouldn't be enough: a CAMetalLayer on the shared view would paint over the entire window, so a macOS GPU path would need a dedicated subview managed natively (plus Retina scale handling).
+- **Cmd-Q must be routed through `_on_close`.** On macOS, Cmd-Q and the app menu's Quit fire Tk's `::tk::mac::Quit`, which by default exits the process without running the `WM_DELETE_WINDOW` handler — settings would silently never save. `main.py` registers `root.createcommand("::tk::mac::Quit", self._on_close)` on darwin.
 
 ## Relationship to Stohrer Sax Shop Companion
 

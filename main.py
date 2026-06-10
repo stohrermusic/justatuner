@@ -12,6 +12,9 @@ other so the OS only sees one open mic at a time.
 """
 
 import builtins
+import logging
+import os
+import subprocess
 import sys
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -25,7 +28,10 @@ if not hasattr(builtins, "_"):
     builtins._ = lambda s: s
 
 
-from config import APP_NAME, APP_VERSION, load_settings, save_settings  # noqa: E402
+from config import (  # noqa: E402
+    APP_NAME, APP_VERSION, load_settings, save_settings,
+    setup_logging, get_log_file,
+)
 from tuner.view import TunerView  # noqa: E402
 from exerciser.view import ExerciserView  # noqa: E402
 from user_guide import open_user_guide  # noqa: E402
@@ -39,6 +45,10 @@ class JustATunerApp:
         self.settings = load_settings()
 
         self.root = tk.Tk()
+        # Route exceptions raised inside Tk callbacks / after-loop frames to
+        # the log + a dialog — Tk swallows them silently by default, which is
+        # where most of this app's code actually runs.
+        self.root.report_callback_exception = _handle_exception
         self.root.title(f"{APP_NAME} v{APP_VERSION}")
         # Fallback geometry — used if maximize fails (e.g. unusual WMs)
         # and as the size the window restores to when un-maximized.
@@ -46,6 +56,13 @@ class JustATunerApp:
         self.root.minsize(960, 620)
         self._maximize_window()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        # WM_DELETE_WINDOW only covers the window close button. On macOS,
+        # Cmd-Q and the app menu's Quit go through Tk's ::tk::mac::Quit
+        # handler, whose default exits the process without running
+        # _on_close — settings would silently never save. Route it
+        # through the same close path.
+        if sys.platform == "darwin":
+            self.root.createcommand("::tk::mac::Quit", self._on_close)
 
         # Notebook + tabs
         self.notebook = ttk.Notebook(self.root)
@@ -141,13 +158,18 @@ class JustATunerApp:
         new_menubar.add_cascade(label="File", menu=file_menu)
         file_menu.add_command(label="Quit", command=self._on_close)
 
-        if not is_tuner and hasattr(self.exerciser, "populate_menu"):
+        if is_tuner:
+            if hasattr(self.tuner, "populate_menu"):
+                self.tuner.populate_menu(new_menubar)
+        elif hasattr(self.exerciser, "populate_menu"):
             self.exerciser.populate_menu(new_menubar)
 
         help_menu = tk.Menu(new_menubar, tearoff=0)
         new_menubar.add_cascade(label="Help", menu=help_menu)
         help_menu.add_command(label="User Guide",
                               command=lambda: open_user_guide(self.root))
+        help_menu.add_command(label="Open Log File",
+                              command=self._open_log_file)
         help_menu.add_separator()
         help_menu.add_command(label="About", command=self._show_about)
 
@@ -163,6 +185,29 @@ class JustATunerApp:
             f"Drone is the original JustATone Python prototype.",
             parent=self.root,
         )
+
+    def _open_log_file(self):
+        """Open the diagnostic log in the OS default handler."""
+        path = get_log_file()
+        if not path or not os.path.exists(path):
+            messagebox.showinfo(
+                "Log file",
+                f"No log file yet — it appears here once something is "
+                f"logged:\n\n{path}",
+                parent=self.root)
+            return
+        try:
+            if sys.platform == "win32":
+                os.startfile(path)  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                subprocess.run(["open", path], check=False)
+            else:
+                subprocess.run(["xdg-open", path], check=False)
+        except Exception as e:
+            messagebox.showerror(
+                "Couldn't open log",
+                f"{e}\n\nThe log file is at:\n{path}",
+                parent=self.root)
 
     # ------------------------------------------------------------------ #
     #  Shutdown
@@ -192,7 +237,28 @@ class JustATunerApp:
             pass
 
 
+def _handle_exception(exc_type, exc_value, exc_tb):
+    """Log an unhandled exception and show a dialog pointing at the log.
+
+    Wired to both ``sys.excepthook`` and Tk's ``report_callback_exception``
+    so a crash in either path leaves a trace — the app ships without a
+    console, so there's nowhere else for it to go.
+    """
+    import traceback
+    tb_text = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
+    logging.error("Unhandled exception:\n%s", tb_text)
+    try:
+        messagebox.showerror(
+            "Unexpected Error",
+            f"{exc_type.__name__}: {exc_value}\n\n"
+            "Details were saved to the log file (Help → Open Log File).")
+    except Exception:
+        pass  # GUI may not be available
+
+
 def main():
+    setup_logging()
+    sys.excepthook = _handle_exception
     app = JustATunerApp()
     app.run()
     return 0

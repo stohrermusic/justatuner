@@ -26,12 +26,21 @@ except ImportError:
     AUDIO_AVAILABLE = False
     PITCH_CLASSES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
 
-# GPU-accelerated renderer (Rust/wgpu) — falls back to canvas if unavailable
-try:
-    import tuner_render
-    _HAS_GPU_RENDERER = True
-except ImportError:
+# GPU-accelerated renderer (Rust/wgpu) — falls back to canvas if unavailable.
+# Never on macOS: Tk Aqua draws all widgets into a single NSView per window,
+# and winfo_id() returns an internal MacDrawable pointer, not an NSView
+# ("the value has no meaning outside Tk" — Tk docs). Handing it to wgpu's
+# Metal backend segfaults in objc_msgSend before Python can catch anything,
+# so the init-failure fallback never gets a chance. Macs use the canvas
+# renderer unconditionally.
+if IS_MACOS:
     _HAS_GPU_RENDERER = False
+else:
+    try:
+        import tuner_render
+        _HAS_GPU_RENDERER = True
+    except ImportError:
+        _HAS_GPU_RENDERER = False
 
 
 # ============================================
@@ -418,6 +427,17 @@ class TunerView:
         app can persist it on close."""
         self._tuner_save_settings()
 
+    def populate_menu(self, menubar):
+        """Add the Tuner menu to the host menubar while the tuner tab is
+        active (mirrors how SSC wires this). The Settings... dialog holds
+        stripe/faceplate color, ring + overall brightness, octave boost,
+        the input-device picker, and the on-screen FPS toggle — none of
+        which are inline, so without this entry they're unreachable."""
+        tuner_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Tuner", menu=tuner_menu)
+        tuner_menu.add_command(label="Settings...",
+                               command=self._tuner_open_settings)
+
     def _init_tuner_state(self):
         """Initialize tuner state. Called from __init__."""
         self._tuner_engine = None
@@ -488,12 +508,15 @@ class TunerView:
             )
             self._tuner_canvas._dark_canvas = True  # Skip theme walker
             self._tuner_canvas.pack(fill="both", expand=True, padx=5, pady=(5, 0))
-            # Persistent CPU mode notice
-            self._cpu_mode_lbl = tk.Label(
-                self._tuner_main_frame,
-                text=_("CPU mode (low FPS) \u2014 install tuner_render for GPU acceleration"),
-                bg=bg, fg="#555555", font=("Helvetica", 8))
-            self._cpu_mode_lbl.place(relx=0.5, y=6, anchor="n")
+            # Persistent CPU mode notice. Not shown on macOS \u2014 canvas is
+            # the only renderer there, so "install tuner_render" would be
+            # misleading advice.
+            if not IS_MACOS:
+                self._cpu_mode_lbl = tk.Label(
+                    self._tuner_main_frame,
+                    text=_("CPU mode (low FPS) \u2014 install tuner_render for GPU acceleration"),
+                    bg=bg, fg="#555555", font=("Helvetica", 8))
+                self._cpu_mode_lbl.place(relx=0.5, y=6, anchor="n")
 
         # --- Control panel (EQ sliders | flat/pilot/sharp | VU meter) ---
         ctrl_bg = "systemWindowBackgroundColor" if IS_MACOS else "#2A2A2A"
