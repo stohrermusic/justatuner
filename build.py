@@ -48,6 +48,24 @@ def _patch_macos_plist():
     print("  Added NSMicrophoneUsageDescription to Info.plist")
 
 
+def _resign_macos_app():
+    """Re-sign the .app after the Info.plist patch.
+
+    PyInstaller ad-hoc signs the bundle as it builds it, and Info.plist is
+    sealed into that signature. Patching the plist afterwards breaks the
+    seal, and macOS TCC silently refuses to show the microphone permission
+    prompt for an app whose signature doesn't validate — the mic key is
+    present but no prompt ever appears (exactly how v1.1.0/v1.1.1 shipped).
+    Re-signing ad-hoc restores the seal; --strict verify catches regressions.
+    """
+    app_path = os.path.join("dist", f"{APP_NAME}.app")
+    subprocess.check_call(
+        ["codesign", "--force", "--deep", "--sign", "-", app_path])
+    subprocess.check_call(
+        ["codesign", "--verify", "--deep", "--strict", app_path])
+    print("  Re-signed .app (ad-hoc) and verified the signature")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--clean", action="store_true",
@@ -114,6 +132,7 @@ def main():
 
     if sys.platform == "darwin":
         _patch_macos_plist()
+        _resign_macos_app()
 
 
 if __name__ == "__main__":
