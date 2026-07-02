@@ -18,7 +18,7 @@ import sys
 
 
 APP_NAME = "JustATuner"
-APP_VERSION = "1.1.1"
+APP_VERSION = "1.1.2"
 
 
 # Settings defaults. Anything read at runtime MUST exist here — the
