@@ -135,7 +135,7 @@ python build.py
 python build.py --clean
 ```
 
-Each platform has to build its own binary — there's no cross-compilation. The GitHub Actions workflow in `.github/workflows/build.yml` does all three (Windows installer, macOS .app, Linux binary) on every push to `main`.
+Each platform has to build its own binary — there's no cross-compilation. The GitHub Actions workflow in `.github/workflows/build.yml` does all three (Windows installer, macOS .app, Linux binary) on every push to `main` or `beta`.
 
 ## Config Location
 

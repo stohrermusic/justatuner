@@ -28,6 +28,20 @@ More extraction-gap fixes + polish, headlined by the macOS launch-crash fix. **S
 
 Known macOS polish, not release-blocking: hardcoded 44.1 kHz streams (CoreAudio usually resamples, but a Bluetooth mic can refuse — retry with the device's `default_samplerate` would be cheap insurance), and the maximize fallback sizes the window to the full screen so the bottom edge can sit behind the Dock.
 
+### v1.1.2 — shipped 2026-07-01
+
+The mac user reports on v1.1.1 came in: **launch was fine** (the canvas-only fix held) but **the mic permission dialog never appeared** — macOS silently denied mic access, wheels never moved. The v1.1.0 plist fix turned out to be necessary but not sufficient:
+
+- **Root cause 1: broken signature seal.** PyInstaller ad-hoc signs the `.app` during build, and Info.plist is sealed into that signature; `_patch_macos_plist()` edited the plist *after* signing with no re-sign, and TCC refuses to prompt for an app whose signature doesn't validate. Confirmed from Windows without Mac hardware by parsing the shipped executable's Mach-O CodeDirectory: the sealed Info.plist hash (special slot −1) didn't match the shipped plist. `build.py` now runs `_resign_macos_app()` (`codesign --force --deep --sign -` + `--verify --strict`) after the patch.
+- **Root cause 2: `zip -r` flattened bundle symlinks.** CI's zip step followed the Frameworks↔Resources symlinks and stored 485 duplicate files, breaking the signature's resource seal a second, independent way. Now packaged with `ditto -c -k --keepParent`; the macOS download dropped 70 MB → 21 MB.
+- **CI guards**: `codesign --verify --deep --strict` on the built `.app` *and* on an unzipped copy of the final artifact, so neither regression can ship silently again.
+- README gained an upgrade note + `tccutil reset Microphone com.stohrer.justatuner` for users whose Macs cached the old denial; ad-hoc signing means a fresh permission prompt per release (normal).
+- Windows/Linux unchanged — macOS-only fix release.
+
+**SSC has the same latent bug** (plist patch after signing, no re-sign) — handoff prompt for an SSC-repo Claude session written 2026-07-02; affects Apple Silicon SSC builds (Intel builds were unsigned, where TCC still prompts, which is why it worked historically). Camera key (`NSCameraUsageDescription`) affected too.
+
+✅ Released: `APP_VERSION` 1.1.2, notes written, merged `beta` → `main`, all three binaries attached. Still unconfirmed on real hardware: a mac user clicking Allow — the artifact's seal is verified byte-for-byte, but the prompt appearing is the final proof.
+
 ## Iterative (Garden is marked beta for a reason)
 
 ### Garden visualizer tuning
