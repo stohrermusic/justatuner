@@ -69,12 +69,18 @@ jobs:
       - name: Build with PyInstaller
         run: python build.py
 
-      - name: Verify microphone permission in Info.plist (macOS)
+      - name: Verify mic permission and code signature (macOS)
         if: matrix.os == 'macos-latest'
+        # The mic key alone is not enough: TCC silently denies (never
+        # prompts) if the bundle's signature doesn't validate, which is
+        # what happens when Info.plist is patched after signing without
+        # re-signing. v1.1.0/v1.1.1 shipped that way.
         run: |
           plutil -extract NSMicrophoneUsageDescription raw \
             dist/JustATuner.app/Contents/Info.plist
           echo "NSMicrophoneUsageDescription present in bundle."
+          codesign --verify --deep --strict dist/JustATuner.app
+          echo "Code signature valid."
 
       # ---------- Windows installer (Inno Setup) ----------
       - name: Extract APP_VERSION from config.py
@@ -109,9 +115,20 @@ jobs:
 
       - name: Package macOS app
         if: runner.os == 'macOS'
+        # ditto, not `zip -r`: zip follows symlinks and stores them as
+        # duplicate files, which breaks the code-signature resource seal
+        # (PyInstaller bundles cross-link Frameworks/ and Resources/).
+        # A broken seal means no TCC mic prompt for end users.
         run: |
           cd dist
-          zip -r ${{ matrix.asset_name }} JustATuner.app
+          ditto -c -k --keepParent JustATuner.app ${{ matrix.asset_name }}
+
+      - name: Verify signature survives zip round-trip (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          ditto -x -k dist/${{ matrix.asset_name }} "$RUNNER_TEMP/ziptest"
+          codesign --verify --deep --strict "$RUNNER_TEMP/ziptest/JustATuner.app"
+          echo "Signature valid after packaging round-trip."
 
       # ---------- Workflow-run artifacts ----------
       - name: Upload artifact (Linux/macOS)
