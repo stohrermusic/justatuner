@@ -80,6 +80,10 @@ VU_ARC_START_DEG = 155.0         # Needle arc start angle (degrees, left side)
 VU_ARC_END_DEG = 25.0            # Needle arc end angle (degrees, right side)
 VU_RADIUS = 80                   # Radius of the VU meter arc
 
+# Below this input rate the mic is almost certainly a Bluetooth hands-free
+# link. Same threshold as exerciser/view.py's LOW_QUALITY_INPUT_HZ.
+LOW_QUALITY_INPUT_HZ = 32000
+
 # --- Sensitivity gain mapping ---
 GAIN_MIN = 0.1                   # Gain at sensitivity=0%
 GAIN_RANGE = 2.4                 # Additional gain at sensitivity=100% (total 2.5)
@@ -733,6 +737,18 @@ class TunerView:
 
         tk.Label(center_frame, text=_("MOTOR PILOT"), bg=ctrl_bg, fg="#555555",
                  font=("Helvetica", 7)).grid(row=row, column=0)
+        row += 1
+
+        # Mic readout: which rate the input stream actually opened at.
+        # Dim and ignorable when it's a normal mic; amber when the rate
+        # says "Bluetooth hands-free" (8/16/24 kHz telephony codec,
+        # speech DSP, 100-300 ms of lag); red when the stream is dead.
+        # The drone tab's MIC status line is the same information.
+        self._tuner_mic_label = tk.Label(
+            center_frame, text="", bg=ctrl_bg, fg="#555555",
+            font=("Helvetica", 7), wraplength=220, justify="center")
+        self._tuner_mic_label.grid(row=row, column=0, pady=(4, 0))
+        self._tuner_mic_label_text = None
         row += 1
 
         # ---- RIGHT: VU meter (centered in its column) ----
@@ -1401,7 +1417,33 @@ class TunerView:
 
         self._tuner_running = True
         self._tuner_set_pilot(True)
+        self._tuner_update_mic_label()
         self._tuner_animate()
+
+    def _tuner_update_mic_label(self):
+        """Refresh the MIC readout under the motor pilot. Cheap enough to
+        call every frame: it only touches the widget when the text
+        changes (the stream can reopen at a new rate on auto-restart)."""
+        lbl = getattr(self, '_tuner_mic_label', None)
+        if lbl is None:
+            return
+        eng = self._tuner_engine
+        if eng is None or not self._tuner_running:
+            text, fg = "", "#555555"
+        elif eng.last_error:
+            text, fg = _("MIC: no input"), "#FF6060"
+        else:
+            khz = eng.sample_rate / 1000.0
+            if eng.sample_rate < LOW_QUALITY_INPUT_HZ:
+                text = _("MIC {khz:g} kHz \u2014 low quality input "
+                         "(Bluetooth-grade: expect lag and coarse pitch; "
+                         "a wired or built-in mic will do better)").format(khz=khz)
+                fg = "#FFB347"
+            else:
+                text, fg = _("MIC {khz:g} kHz").format(khz=khz), "#555555"
+        if text != self._tuner_mic_label_text:
+            self._tuner_mic_label_text = text
+            lbl.configure(text=text, fg=fg)
 
     def _tuner_stop(self):
         """Stop the tuner (audio + animation)."""
@@ -1416,6 +1458,7 @@ class TunerView:
 
         if self._tuner_engine:
             self._tuner_engine.stop()
+        self._tuner_update_mic_label()
 
         if self._tuner_player and self._tuner_player.is_playing:
             self._tuner_player.stop()
@@ -1437,6 +1480,7 @@ class TunerView:
             _t0 = _time.perf_counter()
 
             result = self._tuner_engine.analyze()
+            self._tuner_update_mic_label()
 
             _t1 = _time.perf_counter()
 
@@ -1696,6 +1740,10 @@ class TunerView:
         """Show audio stream error with a retry option."""
         self._tuner_running = False
         self._tuner_set_pilot(False)
+        lbl = getattr(self, '_tuner_mic_label', None)
+        if lbl is not None:
+            self._tuner_mic_label_text = _("MIC: no input")
+            lbl.configure(text=self._tuner_mic_label_text, fg="#FF6060")
         if self._tuner_use_gpu and hasattr(self, '_tuner_error_lbl'):
             self._tuner_error_lbl.configure(
                 text=_("{error_msg}\n\nClick here to retry").format(error_msg=error_msg),

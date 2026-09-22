@@ -49,6 +49,11 @@ COLOR_CREAM_DIM = "#7a7060"
 COLOR_GOLD = "#c89040"
 COLOR_RED = "#cc3333"
 COLOR_GREEN = "#33cc33"
+COLOR_AMBER = "#FFB347"
+
+# Below this input rate the mic is almost certainly a Bluetooth hands-free
+# link (8/16/24 kHz telephony codec, speech DSP, 100-300 ms of lag).
+LOW_QUALITY_INPUT_HZ = 32000
 COLOR_LOCKED = COLOR_PHOSPHOR
 COLOR_CLOSE = COLOR_AMBER
 COLOR_FAR = COLOR_RED
@@ -658,6 +663,12 @@ class ExerciserView:
         if err:
             text = f"No input: {err}"
             fg = "#FF6060"
+        elif self.engine.in_sr < LOW_QUALITY_INPUT_HZ:
+            khz = self.engine.in_sr / 1000.0
+            text = (f"Listening ({khz:g} kHz) — low quality input. "
+                    f"Bluetooth-grade mic: expect lag and coarse pitch. "
+                    f"A wired or built-in mic will do better.")
+            fg = COLOR_AMBER
         else:
             khz = self.engine.in_sr / 1000.0
             rate = f"{khz:g} kHz"

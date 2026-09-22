@@ -170,6 +170,8 @@ class JustATunerApp:
                               command=lambda: open_user_guide(self.root))
         help_menu.add_command(label="Open Log File",
                               command=self._open_log_file)
+        help_menu.add_command(label="Test Audio Latency...",
+                              command=self._open_latency_test)
         help_menu.add_separator()
         help_menu.add_command(label="About", command=self._show_about)
 
@@ -185,6 +187,125 @@ class JustATunerApp:
             f"Drone is the original JustATone Python prototype.",
             parent=self.root,
         )
+
+    def _open_latency_test(self):
+        """Help > Test Audio Latency...: loopback round-trip measurement.
+
+        The measurement (audio_latency.measure) needs the mic, and macOS
+        may refuse a second open of the same input device, so the active
+        tab's engine is stopped for the ~3 s the test runs and restarted
+        through _on_tab_changed afterwards, even if the dialog was closed
+        mid-test. The work runs on a thread; the UI polls it.
+        """
+        import threading
+        import audio_latency
+        from config import resolve_input_device
+
+        if getattr(self, "_latency_dialog", None) is not None:
+            try:
+                self._latency_dialog.lift()
+                return
+            except tk.TclError:
+                self._latency_dialog = None
+
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Audio Latency Test")
+        dlg.transient(self.root)
+        dlg.resizable(False, False)
+        self._latency_dialog = dlg
+
+        intro = (
+            "Plays three short chirps through your speakers and listens for "
+            "them on the microphone, then reports the round trip: how long "
+            "the app waits between a sound happening and hearing it. That "
+            "is the lag you feel on the strobe wheels and the drone "
+            "analysis.\n\n"
+            "Use speakers, not headphones, and keep the room quiet for a "
+            "few seconds. The microphone is handed to the test while it "
+            "runs and returned to the tuner or drone afterwards.")
+        tk.Label(dlg, text=intro, wraplength=460, justify="left",
+                 anchor="w").pack(fill="x", padx=16, pady=(14, 10))
+
+        result_var = tk.StringVar(value="")
+        tk.Label(dlg, textvariable=result_var, wraplength=460,
+                 justify="left", anchor="w").pack(fill="x", padx=16,
+                                                  pady=(0, 10))
+
+        btn_row = tk.Frame(dlg)
+        btn_row.pack(pady=(0, 14))
+        run_btn = tk.Button(btn_row, text="Run Test", width=12)
+        run_btn.pack(side="left", padx=6)
+        tk.Button(btn_row, text="Close", width=12,
+                  command=dlg.destroy).pack(side="left", padx=6)
+
+        state = {"thread": None, "result": None}
+
+        def fmt(r):
+            if r is None:
+                return "The test could not run."
+            lines = []
+            if r.ok:
+                lines.append(f"Round trip: {r.round_trip_ms:.0f} ms "
+                             f"(speakers \u2192 room \u2192 mic).")
+                lines.append(r.verdict())
+            else:
+                lines.append(r.message)
+            if r.reported_input_ms is not None:
+                lines.append(
+                    f"\nReported by the audio driver: input "
+                    f"{r.reported_input_ms:.0f} ms, output "
+                    f"{r.reported_output_ms:.0f} ms. That figure is buffering "
+                    f"only and cannot see a Bluetooth link or the room.")
+            if r.sample_rate:
+                lines.append(f"Stream: {r.sample_rate / 1000:g} kHz, "
+                             f"mic \u201c{r.input_name}\u201d, "
+                             f"speakers \u201c{r.output_name}\u201d.")
+            return "\n".join(lines)
+
+        def finish():
+            # Give the mic back whether or not the dialog still exists.
+            try:
+                self._on_tab_changed()
+            except Exception:
+                logging.exception("Restarting audio after latency test")
+            if dlg.winfo_exists():
+                result_var.set(fmt(state["result"]))
+                run_btn.configure(state="normal")
+
+        def poll():
+            t = state["thread"]
+            if t is not None and t.is_alive():
+                self.root.after(100, poll)
+                return
+            state["thread"] = None
+            finish()
+
+        def run():
+            run_btn.configure(state="disabled")
+            result_var.set("Listening\u2026")
+            self.tuner.stop()
+            self.exerciser.stop()
+            in_dev = resolve_input_device(self.settings)
+
+            def work():
+                try:
+                    state["result"] = audio_latency.measure(input_device=in_dev)
+                except Exception:
+                    logging.exception("Latency test failed")
+                    state["result"] = None
+
+            state["thread"] = threading.Thread(target=work, daemon=True)
+            state["thread"].start()
+            self.root.after(100, poll)
+
+        run_btn.configure(command=run)
+
+        def on_destroy(event=None):
+            if event is not None and event.widget is not dlg:
+                return
+            self._latency_dialog = None
+
+        dlg.bind("<Destroy>", on_destroy)
 
     def _open_log_file(self):
         """Open the diagnostic log in the OS default handler."""

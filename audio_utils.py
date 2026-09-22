@@ -106,6 +106,7 @@ def _open_with_fallback(sd, kind, device, preferred_rate, **kwargs):
     cls = sd.InputStream if kind == "input" else sd.OutputStream
     try:
         stream = cls(samplerate=preferred_rate, device=device, **kwargs)
+        _log_open(kind, device, int(preferred_rate), stream)
         return stream, int(preferred_rate)
     except Exception as first_err:
         fallback = _device_default_rate(sd, device, kind)
@@ -119,7 +120,25 @@ def _open_with_fallback(sd, kind, device, preferred_rate, **kwargs):
             "%s device %r refused %d Hz (%s); opened at %d Hz instead",
             kind, device if device is not None else "default",
             int(preferred_rate), first_err, fallback)
+        _log_open(kind, device, fallback, stream)
         return stream, fallback
+
+
+def _log_open(kind, device, rate, stream):
+    """One line per stream open with the driver's *reported* latency.
+
+    That figure is the host API's own buffering estimate and stops at the
+    driver: a Bluetooth link, its codec and the headset's DSP are invisible
+    to it. Help > Test Audio Latency... measures the real round trip.
+    Logged at WARNING because the app's root logger records nothing
+    lower, and this is the line a field report needs.
+    """
+    try:
+        lat_ms = float(stream.latency) * 1000.0
+    except Exception:
+        lat_ms = float("nan")
+    _log.warning("%s stream open: device %r, %d Hz, reported latency %.0f ms",
+                 kind, device if device is not None else "default", rate, lat_ms)
 
 
 def open_input_stream(sd, device, preferred_rate, **kwargs):

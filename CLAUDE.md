@@ -64,6 +64,9 @@ config.py               → DEFAULT_SETTINGS, settings I/O, per-platform config
 audio_utils.py          → AudioRingBuffer + open_input_stream()/
                           open_output_stream() sample-rate fallback helpers
                           (shared by both audio engines)
+audio_latency.py        → Help > Test Audio Latency…: loopback round-trip
+                          measurement (chirps out, cross-correlate mic);
+                          pure numpy + sounddevice, dialog lives in main.py
 user_guide.py           → Help > User Guide content + window
 build.py                → PyInstaller wrapper
 
@@ -111,6 +114,10 @@ installer.iss           → Inno Setup script for Windows installer
 **Input device by name**: the persisted mic choice is `audio_input_device_name`; `audio_input_device` (the PortAudio index) is only a cache. PortAudio renumbers devices whenever USB/Bluetooth devices come and go, so both views call `config.resolve_input_device(settings)` at start (name match → prefix match → migrate a legacy index → system default) and `config.remember_input_device(settings, idx)` when the user picks one. Both tabs share the one saved device.
 
 **Error logging**: `config.setup_logging()` writes a rotating `app.log` (500KB, 1 backup) to the config dir. `main.py` wires both `sys.excepthook` and Tk's `report_callback_exception` to `_handle_exception`, which logs the full traceback and shows a dialog pointing at **Help > Open Log File**. The shipped app is `--windowed`/`--noconsole`, so `print()` goes nowhere — use `logging` for anything diagnostic (the root logger is at WARNING, so log audio-device trouble at WARNING). Native crashes (e.g. in a GPU driver) bypass all of this; those need the OS crash report.
+
+**Mic status readouts**: both tabs surface the input stream's state from the live rate. The drone tab's MIC line (`ExerciserView._update_mic_status`) and the tuner's readout under the motor pilot (`TunerView._tuner_update_mic_label`) show "44.1 kHz" dimly when normal, go **amber** with a "low quality input" note when the rate is under `LOW_QUALITY_INPUT_HZ` (32 kHz — a Bluetooth hands-free link, in practice), and red with the reason when the stream is dead. Both update on their existing frame timers and only touch the widget when the text changes.
+
+**Latency test**: `audio_latency.measure()` opens one full-duplex `sd.playrec` stream (shared clock for both directions, output device chosen on the *same host API* as the input or Windows raises "Illegal combination of I/O devices"), plays three Hann-windowed 500–3000 Hz chirps 0.7 s apart, cross-correlates each search window against the chirp, and reports the median lag when at least two readings agree within 15 ms. The driver's `stream.latency` is reported alongside as "buffering only". `main.py._open_latency_test` stops both engines for the run and restarts the active one via `_on_tab_changed` when the worker thread finishes, even if the dialog was closed. Laptop mics with driver-level echo cancellation (Intel Smart Sound on the dev machine) swallow the chirps; the failure message says so. Validated against the Realtek Stereo Mix loopback (90 ms, three agreeing readings) and a synthetic delayed-echo mock.
 
 **Sample rate is negotiated, never assumed**: both engines *prefer* 44.1 kHz but open through `audio_utils.open_input_stream()`/`open_output_stream()`, which retry at the device's `default_samplerate` when it refuses. Windows and PulseAudio resample transparently so the retry never fires there; CoreAudio does not, and a Bluetooth HFP mic (16/24 kHz) or an interface pinned to 48 kHz raises "Invalid sample rate". `TunerEngine.sample_rate`, `AudioEngine.in_sr` (mic) and `AudioEngine.sr` (drone output) hold the live rates and every bit of frequency math reads them — the `SAMPLE_RATE` constants are only the preference.
 
