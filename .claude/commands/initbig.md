@@ -70,9 +70,10 @@ recommendation and wait for explicit approval before touching structure.
      newest git tag and release notes file?
 
 4. **Memory is out of scope.** This project's Claude memory lives OUTSIDE
-   the repo (in `C:\Users\abadc\.claude\projects\C--code\memory\`, indexed
-   by its `MEMORY.md` — Matt works from `C:\code`, so memory accrues under
-   that project key). Do NOT edit memory content during a doc audit. You
+   the repo (in `~/.claude/projects/<project-key>/memory/`, indexed by
+   its `MEMORY.md` — the project key is derived from the working
+   directory, e.g. `C--code-justatuner` for a checkout at C:/code/justatuner).
+   Do NOT edit memory content during a doc audit. You
    may *note* if a memory entry names a symbol/file that no longer exists,
    as a heads-up for the next session.
 
