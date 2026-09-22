@@ -26,6 +26,18 @@ Dependencies: `numpy`, `sounddevice`, `pillow`, `pyinstaller` (for building). Th
 
 There is no test suite yet. The app is verified by running it with a microphone and a pair of headphones.
 
+## Smoke Testing Without a Test Suite
+
+Patterns that caught real bugs during the v1.1.3 work; use them before claiming a UI or audio change works:
+
+- **Drive the real app on a hidden root.** `app = main.JustATunerApp(); app.root.withdraw()` then pump `root.update()` in a loop. Select tabs with `app.notebook.select(app.exerciser_frame)`, poke engine state, read widgets. Withdrawing avoids flashing a window at whoever is watching the screen (and them closing it mid-test). Widget sizes are still available via `winfo_reqheight()`.
+- **Monkeypatch `tkinter.messagebox`** (`showerror`/`showinfo`/`showwarning` to print) before importing `main`, or the exception hook's error dialog blocks the update loop forever.
+- **Open the lazy-import dialogs.** `tuner/view.py`'s settings dialog imports `config.get_input_devices` and `ui_dialogs.add_tooltip` *inside* `_tuner_open_settings`, so `import tuner.view` succeeding proves nothing; two releases shipped with the dialog raising ImportError. Call `app.tuner._tuner_open_settings()` and confirm a `Tuner Settings` Toplevel appears.
+- **Mock sounddevice for the macOS-only paths.** Windows MME accepts any sample rate (it resamples), so the CoreAudio "Invalid sample rate" fallback never fires here. Set `tuner.engine.sd = FakeSD` where `FakeSD.InputStream` raises on 44100 and `query_devices` reports a 16 kHz default, then feed `engine._ring_buffer.write(sine)` and check `analyze()` lights the right wheel.
+- **Silence detection can't be tested with the real mic** (it keeps resetting the timer); stub `engine.silent_seconds = lambda: 10.0` for the UI path and call `_audio_callback` with zeros/non-zeros directly for the engine path.
+- **`python audio_latency.py`** runs the loopback latency test standalone. On the dev laptop the Intel Smart Sound mic array cancels its own speaker output, so use the Realtek "Stereo Mix" input to validate the pipeline, or mock `sd.playrec` to return a delayed copy of the signal.
+- **Lint**: `ruff check --select F,E9 <files>`. `tuner/view.py` has ~43 baseline `F821 Undefined name _` hits because `main.py` injects `_` as a builtin; compare counts against `git show HEAD:<file>` rather than reading the raw total.
+
 ## Building Executables
 
 ```bash
@@ -287,7 +299,15 @@ git push origin main
 #    attaches all three platform binaries to the release page
 gh release create vX.Y.Z --target main --title "JustATuner vX.Y.Z" \
     --notes-file release_notes_vX.Y.Z.md
+
+# 6. Watch the release-event run (not the push runs) and confirm all
+#    three assets landed; the release page is live before CI finishes.
+gh run list --limit 4 --json databaseId,event,status,displayTitle
+gh run watch <release run id> --exit-status --interval 30
+gh release view vX.Y.Z --json assets --jq '.assets[] | "\(.name) \(.size)"'
 ```
+
+Expect roughly 36 MB for the Windows installer, 22 MB for the macOS zip (a ~70 MB zip means `zip -r` crept back in and the signature seal is broken), and 53 MB for the Linux binary. Then `git checkout beta` so the next change does not land on `main`, and update the shipped-version entry in the `TODO.md` ledger.
 
 ## CI/CD (GitHub Actions)
 
