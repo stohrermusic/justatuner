@@ -7,6 +7,7 @@ tuner inside JustATuner's notebook.
 """
 
 import colorsys
+import logging
 import os
 import random
 import tkinter as tk
@@ -24,9 +25,10 @@ from exerciser.intervals import (
     NOTE_NAMES, TRANSPOSITIONS,
     note_freq, analyze_interval, transpose_note_name, freq_to_note_name,
 )
-from exerciser.engine import AudioEngine, INSTRUMENT_PRESETS, list_input_devices
+from exerciser.engine import AudioEngine, INSTRUMENT_PRESETS
 from exerciser.widgets import RoundScope
-from config import get_config_dir
+from config import (get_config_dir, get_input_devices, resolve_input_device,
+                    remember_input_device)
 
 
 # Frame rates
@@ -164,6 +166,13 @@ class ExerciserView:
         # devices, but the input stream isn't started until start()).
         self.engine = AudioEngine()
         self.engine.set_instrument(self.instrument.get())
+        # Same persisted mic as the tuner tab (resolved by name, so a
+        # shuffled PortAudio index can't send us to the wrong device).
+        _dev_idx = resolve_input_device(self.settings)
+        self.engine.set_input_device(_dev_idx)
+        if _dev_idx is not None:
+            self.input_device.set(
+                self.settings.get("audio_input_device_name") or "Default")
         self.engine.set_drone(
             freq=note_freq(self.root_note, self.octave),
             voicing=self.drone_voicing,
@@ -211,9 +220,11 @@ class ExerciserView:
         try:
             self.engine.start()
         except RuntimeError as e:
-            # No sounddevice / no input device. The UI still renders;
-            # everything just shows "no signal" until audio comes back.
-            print(f"Exerciser audio error: {e}")
+            # sounddevice itself is missing. The UI still renders;
+            # everything just shows "no signal".
+            logging.warning("Exerciser audio error: %s", e)
+            self.engine.input_error = str(e)
+        self._update_mic_status()
         self._update_scope()
         self._update_analysis()
 
@@ -624,6 +635,38 @@ class ExerciserView:
         )
         self.drone_status.pack(anchor="w", pady=(2, 0))
 
+        # Mic health. Until v1.1.3 a mic that failed to open was reported
+        # with print() only, which the windowed build discards, so the
+        # drone tab just sat there showing "no signal" with no clue why.
+        tk.Label(
+            frame, text="MIC", font=("Helvetica", 8, "bold"),
+            fg=COLOR_CREAM_DIM, bg=COLOR_PANEL,
+        ).pack(anchor="w", pady=(6, 0))
+        self.mic_status = tk.Label(
+            frame, text="", font=("Helvetica", 9),
+            fg=COLOR_CREAM_DIM, bg=COLOR_PANEL,
+            justify="left", anchor="w", wraplength=260,
+        )
+        self.mic_status.pack(anchor="w", fill="x", pady=(2, 0))
+        self._mic_status_text = None
+
+    def _update_mic_status(self):
+        """Reflect engine.input_error / rate in the MIC status label."""
+        if not hasattr(self, "mic_status"):
+            return
+        err = self.engine.input_error
+        if err:
+            text = f"No input: {err}"
+            fg = "#FF6060"
+        else:
+            khz = self.engine.in_sr / 1000.0
+            rate = f"{khz:g} kHz"
+            text = f"Listening ({rate})"
+            fg = COLOR_GREEN
+        if text != self._mic_status_text:
+            self._mic_status_text = text
+            self.mic_status.config(text=text, fg=fg)
+
     # ------------------------------------------------------------------ #
     #  Event handlers
     # ------------------------------------------------------------------ #
@@ -821,10 +864,11 @@ class ExerciserView:
 
     def _on_input_device_changed(self, device_index):
         self.engine.set_input_device(device_index)
+        remember_input_device(self.settings, device_index)
         if device_index is None:
             self.input_device.set("Default")
         else:
-            for idx, name in list_input_devices():
+            for idx, name in get_input_devices():
                 if idx == device_index:
                     self.input_device.set(name)
                     break
@@ -839,7 +883,7 @@ class ExerciserView:
             command=lambda: self._on_input_device_changed(None),
         )
         self._device_menu.add_separator()
-        for idx, name in list_input_devices():
+        for idx, name in get_input_devices():
             self._device_menu.add_radiobutton(
                 label=name,
                 variable=self.input_device, value=name,
@@ -935,6 +979,7 @@ class ExerciserView:
         if not self._running:
             return
         freq, confidence = self.engine.get_pitch()
+        self._update_mic_status()
         root_freq = note_freq(self.root_note, self.octave)
 
         if freq is not None and confidence > 0.2:

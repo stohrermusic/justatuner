@@ -10,6 +10,7 @@ octaves. Phase tracking drives the stroboscopic rotation effect.
 Requires: numpy, sounddevice (imported with try/except for graceful fallback)
 """
 
+import logging
 import math
 import time
 
@@ -22,16 +23,23 @@ except (ImportError, OSError):
     np = None
     sd = None
 
-from audio_utils import AudioRingBuffer  # noqa: E402 — shared with toner_engine
+from audio_utils import (  # noqa: E402 — shared with toner_engine
+    AudioRingBuffer, open_input_stream, open_output_stream)
+
+_log = logging.getLogger(__name__)
 
 
 # ============================================
 # CONSTANTS
 # ============================================
 
+# Preferred capture rate. The stream is opened at this rate when the
+# device allows it; otherwise (CoreAudio with a Bluetooth mic, or an
+# interface pinned to 48 kHz) it falls back to the device's native rate
+# and TunerEngine.sample_rate reports what was actually opened. All
+# frequency math reads the live rate, never this constant.
 SAMPLE_RATE = 44100
-BUFFER_SECONDS = 0.2  # 200ms ring buffer
-BUFFER_SIZE = int(SAMPLE_RATE * BUFFER_SECONDS)
+BUFFER_SECONDS = 0.2  # 200ms ring buffer (sized at open, see _open_stream)
 FFT_SIZE = 4096  # ~93ms at 44100Hz, ~10.77Hz bin resolution
 
 PITCH_CLASSES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
@@ -115,6 +123,7 @@ class TunerEngine:
         self._last_device = None   # For auto-restart
         self._stale_count = 0      # Consecutive stale reads
         self.last_error = None     # Set when stream restart fails
+        self._sample_rate = SAMPLE_RATE  # Rate the open stream actually runs at
         # Per-ring smoothed magnitudes — temporal decay like physical disc inertia
         self._smoothed_ring_mags = [[0.0] * NUM_RINGS for _ in range(12)]
         # Per-ring independent phase accumulators — each ring tracks its own
@@ -169,7 +178,6 @@ class TunerEngine:
         if self._running:
             self.stop()
 
-        self._ring_buffer = AudioRingBuffer(BUFFER_SIZE)
         self._window = np.hanning(FFT_SIZE).astype(np.float32)
         self._phase_offsets = [0.0] * 12
         self._last_time = time.perf_counter()
@@ -178,20 +186,50 @@ class TunerEngine:
         self.last_error = None
 
         try:
-            self._stream = sd.InputStream(
-                samplerate=SAMPLE_RATE,
-                channels=1,
-                dtype='float32',
-                blocksize=1024,
-                device=device,
-                callback=self._audio_callback,
-            )
-            self._stream.start()
+            self._open_stream(device)
             self._running = True
             return True, None
         except Exception as e:
+            # A specific device that won't open (unplugged since the
+            # index was saved, grabbed exclusively by another app, or
+            # simply gone) shouldn't leave the tuner dead — fall back to
+            # the system default and remember that for auto-restarts.
+            if device is not None:
+                _log.warning("Input device %r failed (%s); trying system default",
+                             device, e)
+                try:
+                    self._open_stream(None)
+                    self._last_device = None
+                    self._running = True
+                    return True, None
+                except Exception as e2:
+                    e = e2
             self._running = False
             return False, str(e)
+
+    def _open_stream(self, device):
+        """Open + start the input stream on ``device`` (None = default),
+        preferring SAMPLE_RATE but accepting the device's native rate.
+        Sizes the ring buffer for the rate that was actually opened."""
+        stream, rate = open_input_stream(
+            sd, device, SAMPLE_RATE,
+            channels=1,
+            dtype='float32',
+            blocksize=1024,
+            callback=self._audio_callback,
+        )
+        self._sample_rate = rate
+        # 200 ms of audio, but never less than one FFT frame — at 16 kHz
+        # (Bluetooth HFP) 200 ms is only 3200 samples.
+        size = max(int(rate * BUFFER_SECONDS), FFT_SIZE)
+        self._ring_buffer = AudioRingBuffer(size)
+        self._stream = stream
+        self._stream.start()
+
+    @property
+    def sample_rate(self):
+        """Sample rate of the currently open stream (Hz)."""
+        return self._sample_rate
 
     def stop(self):
         """Stop audio capture."""
@@ -257,21 +295,14 @@ class TunerEngine:
             except Exception:
                 pass
 
-        self._ring_buffer = AudioRingBuffer(BUFFER_SIZE)
+        self._stream = None
         self._window = np.hanning(FFT_SIZE).astype(np.float32)
 
         try:
-            self._stream = sd.InputStream(
-                samplerate=SAMPLE_RATE,
-                channels=1,
-                dtype='float32',
-                blocksize=1024,
-                device=self._last_device,
-                callback=self._audio_callback,
-            )
-            self._stream.start()
+            self._open_stream(self._last_device)
             self.last_error = None
         except Exception as e:
+            _log.warning("Audio stream restart failed: %s", e)
             self._running = False
             self.last_error = f"Audio stream lost: {e}"
 
@@ -305,7 +336,8 @@ class TunerEngine:
         spectrum = np.fft.rfft(windowed)
         mags = np.abs(spectrum)
 
-        bin_freq = SAMPLE_RATE / FFT_SIZE  # ~10.77 Hz
+        sample_rate = self._sample_rate
+        bin_freq = sample_rate / FFT_SIZE  # ~10.77 Hz at 44.1 kHz
 
         # Adaptive noise floor threshold
         noise_floor = np.median(mags[10:]) * NOISE_FLOOR_MULTIPLIER if len(mags) > 10 else 0.0
@@ -320,7 +352,7 @@ class TunerEngine:
             best_octave = -1
 
             for oct_idx, freq in enumerate(self._freq_table[pc]):
-                if freq < MIN_FREQUENCY_HZ or freq > SAMPLE_RATE / 2:
+                if freq < MIN_FREQUENCY_HZ or freq > sample_rate / 2:
                     continue
 
                 bin_idx = int(round(freq / bin_freq))
@@ -462,6 +494,7 @@ class ReferencePlayer:
         self._frequency = 440.0
         self._waveform = "pure"
         self._sample_idx = 0
+        self._sample_rate = SAMPLE_RATE
 
     def play(self, frequency, waveform="pure"):
         """Start playing a reference tone.
@@ -482,8 +515,8 @@ class ReferencePlayer:
         self._sample_idx = 0
 
         try:
-            self._stream = sd.OutputStream(
-                samplerate=SAMPLE_RATE,
+            self._stream, self._sample_rate = open_output_stream(
+                sd, None, SAMPLE_RATE,
                 channels=1,
                 dtype='float32',
                 blocksize=1024,
@@ -492,7 +525,8 @@ class ReferencePlayer:
             self._stream.start()
             self._playing = True
             return True
-        except Exception:
+        except Exception as e:
+            _log.warning("Reference tone output failed: %s", e)
             return False
 
     def stop(self):
@@ -512,7 +546,7 @@ class ReferencePlayer:
 
     def _output_callback(self, outdata, frames, time_info, status):
         """Sounddevice output callback (audio thread)."""
-        t = (self._sample_idx + np.arange(frames, dtype=np.float64)) / SAMPLE_RATE
+        t = (self._sample_idx + np.arange(frames, dtype=np.float64)) / self._sample_rate
         freq = self._frequency
 
         if self._waveform == "pure":

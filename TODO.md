@@ -42,6 +42,18 @@ The mac user reports on v1.1.1 came in: **launch was fine** (the canvas-only fix
 
 ✅ Released: `APP_VERSION` 1.1.2, notes written, merged `beta` → `main`, all three binaries attached. Still unconfirmed on real hardware: a mac user clicking Allow — the artifact's seal is verified byte-for-byte, but the prompt appearing is the final proof.
 
+### v1.1.3 — on `beta`, awaiting Apple Silicon test (2026-09-22)
+
+Audio-input robustness pass, prompted by "did we miss any of the SSC mac audio fixes?" (answer: no — the three SSC mac commits were all ported both ways already; the shared `tuner_engine.py`/`audio_utils.py` were byte-identical). What remained were latent issues in the shared audio code that only a Mac would surface, plus one real extraction bug:
+
+- **Sample-rate negotiation** — both engines demanded 44.1 kHz. Windows/PulseAudio resample; CoreAudio refuses ("Invalid sample rate", PaErrorCode -9997) for Bluetooth HFP mics (16/24 kHz) and interfaces pinned to 48 kHz. New `audio_utils.open_input_stream()/open_output_stream()` retry at the device's `default_samplerate`; `TunerEngine.sample_rate` and `AudioEngine.in_sr`/`sr` carry the live rates through all the frequency math. Tuner ring buffer is sized `max(rate*0.2s, FFT_SIZE)` so 16 kHz still fills one FFT frame.
+- **Tuner > Settings… was broken in every release** — `tuner/view.py` imports `config.get_input_devices`, which the SSC extraction never brought over; the dialog raised ImportError (caught by the Tk exception hook → error dialog). Added to `config.py`, minus SSC's "skip devices under 44.1 kHz" filter since we resample now.
+- **Device persisted by name** — new `audio_input_device_name` setting; `config.resolve_input_device()` matches by name at startup (prefix fallback for Windows' truncated names), migrates a legacy integer index, and falls back to system default when the device is absent. Both tabs now honor the same saved device (the exerciser used to ignore it).
+- **Tuner: chosen device that fails → system default** (`TunerEngine.start` retries with `device=None`, logs a warning).
+- **Exerciser: input health check + auto-reopen** — `_check_input_health()` on the `get_pitch()` timer: reopens when the callback has been silent >1.5 s or never opened, paced at 3 s. `engine.input_error` feeds a new **MIC** status line in the drone tab ("Listening (44.1 kHz)" / "No input: …"). All audio failures now go to `app.log` instead of `print()`.
+
+Verified on Windows: unit-level mock of the CoreAudio refusal (fallback to 16 kHz, A4 detected on the A wheel at 0.76 ¢), bogus-device fallback on both engines, stale-callback restart, legacy-index migration, both tabs running in Tk. **Mac test checklist for next week** (friend's Apple Silicon Mac, ideally with AirPods): (1) launch, mic prompt appears, wheels move on built-in mic; (2) pair AirPods, pick them in Tuner > Settings… → wheels still move, `app.log` shows the "refused 44100 Hz … opened at N Hz" line; (3) same on the drone tab — MIC line shows the rate; (4) disconnect AirPods mid-session → drone tab MIC line goes red then recovers on the built-in mic within ~5 s; tuner shows retry or recovers; (5) quit with Cmd-Q, relaunch → device choice remembered. **If everything passes, port to SSC**: `audio_utils.py` (drop-in, identical), `tuner_engine.py` (identical to `tuner/engine.py`), `config.get_input_devices` (SSC already has it; drop the <44100 filter and add `resolve_input_device`/`remember_input_device` + the `audio_input_device_name` default), `tuner_tab.py` device handling, and consider the same rate fallback in `toner_engine.py`.
+
 ## Iterative (Garden is marked beta for a reason)
 
 ### Garden visualizer tuning

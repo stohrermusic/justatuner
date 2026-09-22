@@ -1218,7 +1218,8 @@ class TunerView:
         frame.pack(fill="both", expand=True)
 
         # --- Input device ---
-        from config import get_input_devices
+        from config import (get_input_devices, resolve_input_device,
+                            remember_input_device)
         devices = get_input_devices()
         if devices:
             mic_row = tk.Frame(frame, bg=bg)
@@ -1238,7 +1239,7 @@ class TunerView:
                 tk.Label(mic_row, text=_("System Default (set in system audio settings)"),
                          bg=bg, fg="#888888", font=("Helvetica", 10)).pack(side="left")
             else:
-                current_dev = self.settings.get("audio_input_device")
+                current_dev = resolve_input_device(self.settings)
                 dev_names = [_("System Default")] + [name for _, name in devices]
                 dev_indices = [None] + [idx for idx, _ in devices]
 
@@ -1261,7 +1262,7 @@ class TunerView:
                 def on_mic_changed(event=None):
                     sel = mic_combo.current()
                     dev_idx = dev_indices[sel] if sel >= 0 else None
-                    self.settings["audio_input_device"] = dev_idx
+                    remember_input_device(self.settings, dev_idx)
                     # Restart engine with new device
                     if self._tuner_engine and self._tuner_engine.is_running:
                         self._tuner_stop()
@@ -1380,7 +1381,8 @@ class TunerView:
         if not self._tuner_wheels_built:
             self._tuner_build_wheels()
 
-        device = self.settings.get("audio_input_device")
+        from config import resolve_input_device
+        device = resolve_input_device(self.settings)
         success, err = self._tuner_engine.start(device=device)
         if not success:
             if self._tuner_use_gpu and hasattr(self, '_tuner_error_lbl'):

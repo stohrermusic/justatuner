@@ -59,8 +59,11 @@ main.py                 → Tk root + two-tab Notebook + on_tab_changed engine
                           swap; exception hooks (sys.excepthook + Tk
                           report_callback_exception → app.log + error dialog)
 config.py               → DEFAULT_SETTINGS, settings I/O, per-platform config
-                          dir, setup_logging() (rotating app.log)
-audio_utils.py          → AudioRingBuffer (shared by both audio engines)
+                          dir, setup_logging() (rotating app.log),
+                          get_input_devices() + resolve/remember_input_device()
+audio_utils.py          → AudioRingBuffer + open_input_stream()/
+                          open_output_stream() sample-rate fallback helpers
+                          (shared by both audio engines)
 user_guide.py           → Help > User Guide content + window
 build.py                → PyInstaller wrapper
 
@@ -101,11 +104,15 @@ installer.iss           → Inno Setup script for Windows installer
 
 **Tab-aware audio**: only the active notebook tab's engine has an open sounddevice InputStream. `main.py`'s `_on_tab_changed` stops one and starts the other. Critical because the OS sometimes refuses two concurrent opens on the same input device on macOS.
 
-**Tab-specific menus**: each tab rebuilds the menubar when it becomes active. The exerciser contributes Drone / Exerciser Options menus; the tuner contributes a **Tuner** menu whose **Settings…** entry opens `_tuner_open_settings` (stripe/faceplate color, ring + overall brightness, octave boost, input-device picker, on-screen FPS toggle). Some tuner controls are also inline (sensitivity, reference pitch, transposition, waveform). The Tuner menu's wiring was missing until v1.1.x — the dialog existed but nothing opened it (an extraction gap).
+**Tab-specific menus**: each tab rebuilds the menubar when it becomes active. The exerciser contributes Drone / Exerciser Options menus; the tuner contributes a **Tuner** menu whose **Settings…** entry opens `_tuner_open_settings` (stripe/faceplate color, ring + overall brightness, octave boost, input-device picker, on-screen FPS toggle). Some tuner controls are also inline (sensitivity, reference pitch, transposition, waveform). The Tuner menu's wiring was missing until v1.1.x — the dialog existed but nothing opened it (an extraction gap) — and once wired, the dialog raised ImportError until v1.1.3 because `config.get_input_devices` (imported inside `_tuner_open_settings`) hadn't been extracted either.
 
 **Settings persistence**: `config.load_settings()` does a two-level deep merge with `DEFAULT_SETTINGS` so old config files survive new keys being added. Save happens on app close in `JustATunerApp._on_close` via both views' `save_settings()` methods.
 
-**Error logging**: `config.setup_logging()` writes a rotating `app.log` (500KB, 1 backup) to the config dir. `main.py` wires both `sys.excepthook` and Tk's `report_callback_exception` to `_handle_exception`, which logs the full traceback and shows a dialog pointing at **Help > Open Log File**. The shipped app is `--windowed`/`--noconsole`, so `print()` goes nowhere — use `logging` for anything diagnostic. Native crashes (e.g. in a GPU driver) bypass all of this; those need the OS crash report.
+**Input device by name**: the persisted mic choice is `audio_input_device_name`; `audio_input_device` (the PortAudio index) is only a cache. PortAudio renumbers devices whenever USB/Bluetooth devices come and go, so both views call `config.resolve_input_device(settings)` at start (name match → prefix match → migrate a legacy index → system default) and `config.remember_input_device(settings, idx)` when the user picks one. Both tabs share the one saved device.
+
+**Error logging**: `config.setup_logging()` writes a rotating `app.log` (500KB, 1 backup) to the config dir. `main.py` wires both `sys.excepthook` and Tk's `report_callback_exception` to `_handle_exception`, which logs the full traceback and shows a dialog pointing at **Help > Open Log File**. The shipped app is `--windowed`/`--noconsole`, so `print()` goes nowhere — use `logging` for anything diagnostic (the root logger is at WARNING, so log audio-device trouble at WARNING). Native crashes (e.g. in a GPU driver) bypass all of this; those need the OS crash report.
+
+**Sample rate is negotiated, never assumed**: both engines *prefer* 44.1 kHz but open through `audio_utils.open_input_stream()`/`open_output_stream()`, which retry at the device's `default_samplerate` when it refuses. Windows and PulseAudio resample transparently so the retry never fires there; CoreAudio does not, and a Bluetooth HFP mic (16/24 kHz) or an interface pinned to 48 kHz raises "Invalid sample rate". `TunerEngine.sample_rate`, `AudioEngine.in_sr` (mic) and `AudioEngine.sr` (drone output) hold the live rates and every bit of frequency math reads them — the `SAMPLE_RATE` constants are only the preference.
 
 ## Audio Engines
 
@@ -113,11 +120,15 @@ installer.iss           → Inno Setup script for Windows installer
 
 12 chromatic pitch classes, each with seven concentric rings (one per octave). FFT-based pitch detection with per-pitch-class phase tracking — phase deviation drives the stroboscopic rotation effect. Magnitude normalization is gated: `max_mag` must exceed `threshold * 1.5` before normalizing to 0–1, otherwise all magnitudes are zeroed. This prevents sensitive mics from showing wheel activity on room noise.
 
-Audio stream health monitoring via `AudioRingBuffer.is_stale()` — if no new audio data arrives for ~1 second, the engine restarts the sounddevice stream. Recovers from silent callback death on Windows.
+Audio stream health monitoring via `AudioRingBuffer.is_stale()` — if no new audio data arrives for ~1 second, the engine restarts the sounddevice stream. Recovers from silent callback death on Windows. The ring buffer is sized at open to `max(rate × 0.2 s, FFT_SIZE)` so a 16 kHz stream still fills one FFT frame.
+
+`start(device)` falls back to the system default when the requested device won't open (unplugged since it was saved, grabbed exclusively, index shifted) and logs a warning; `_last_device` is updated so auto-restarts stay on the working device.
 
 ### Exerciser engine (`exerciser/engine.py`)
 
-Drone synthesizer + mic input + pitch detection in one class. `_rebuild_oscillators` builds a per-voice list `_osc_freqs = [(freq, amp), ...]` driven by the current voicing (root / root+fifth / major / minor) and sound type:
+Drone synthesizer + mic input + pitch detection in one class. Two independent rates: `in_sr` (mic; YIN, drone-notch, Lissajous reference sine, recording) and `sr` (drone output; oscillator phase increments, sample playback rate). Input health is checked on the `get_pitch()` timer by `_check_input_health()`: if the input callback has been silent for `INPUT_STALE_S` (1.5 s) or the stream never opened, it reopens, paced by `INPUT_RETRY_S` (3 s) so an absent mic doesn't hammer PortAudio. `input_error` (None when healthy) drives the drone tab's **MIC** status line via `ExerciserView._update_mic_status`.
+
+`_rebuild_oscillators` builds a per-voice list `_osc_freqs = [(freq, amp), ...]` driven by the current voicing (root / root+fifth / major / minor) and sound type:
 
 - **sine**: one oscillator per voice
 - **rich**: one oscillator per voice plus 8 harmonics each (decreasing amplitude)
@@ -291,7 +302,7 @@ User settings live in `app_settings.json` at:
 
 Schema lives in `config.py`'s `DEFAULT_SETTINGS`. Anything read at runtime MUST exist in `DEFAULT_SETTINGS` — the merge in `load_settings` only preserves keys that already appear in the defaults, so runtime-only keys silently disappear on next launch.
 
-Top-level keys: `tuner_settings` (dict), `exerciser_settings` (dict), `audio_input_device` (int or None), `active_tab` (str — "tuner" or "exerciser").
+Top-level keys: `tuner_settings` (dict), `exerciser_settings` (dict), `audio_input_device` (int or None — cached PortAudio index), `audio_input_device_name` (str or None — the real persisted choice, see Input device by name), `active_tab` (str — "tuner" or "exerciser").
 
 ## Per-Platform Constraints
 
@@ -300,6 +311,7 @@ Top-level keys: `tuner_settings` (dict), `exerciser_settings` (dict), `audio_inp
 - **macOS mic permission must be declared in the bundle — and the bundle must be re-signed after patching it.** `build.py`'s `_patch_macos_plist()` adds `NSMicrophoneUsageDescription` to the `.app` Info.plist post-build; without it macOS silently denies microphone access. v1.0.0 shipped without it (an extraction regression). But patching the plist after PyInstaller's ad-hoc signing breaks the signature seal, and TCC also silently denies (never prompts) when the signature doesn't validate — so v1.1.0/v1.1.1 had the key yet still never asked for the mic. `_resign_macos_app()` re-signs after the patch, and CI packages with symlink-preserving `ditto` (not `zip -r`) and runs `codesign --verify --deep --strict` on both the built app and the unzipped artifact. Users upgrading from a broken build may need `tccutil reset Microphone com.stohrer.justatuner` if macOS cached a denial.
 - **GPU tuner renderer is built in CI** (v1.1.0+), **Windows and Linux only**. The Rust/wgpu `tuner_render` crate lives in `tuner_renderer/` (copied from SSC); maturin builds it on those runners and `build.py`'s `--hidden-import` capability check bundles it, with `tuner/view.py` falling back to the Tk canvas renderer when it's absent. **v1.0.0 shipped without it** — the extraction brought over the Python integration in `tuner/view.py` but not the crate or the build wiring, so end users got canvas-only while a stray local `tuner_render` install masked the gap in dev. Fixed in v1.1.0.
 - **macOS is canvas-only — never load `tuner_render` on darwin.** Tk Aqua draws all widgets into a single NSView per toplevel, and `winfo_id()` returns an internal `MacDrawable` pointer ("the value has no meaning outside Tk" — Tk docs), not an NSView. `tuner_renderer/src/platform.rs` treats the handle as an NSView, so wgpu's Metal backend segfaults in `objc_msgSend` during surface creation — a native crash the Python `except` fallback in `tuner/view.py` can never catch. Three layers enforce this: `tuner/view.py` skips the `tuner_render` import on darwin, `build.py` skips the `--hidden-import` on darwin, and CI skips the Rust build on the macOS runner. The v1.1.0 macOS zip shipped with the renderer bundled and likely crashed at launch. Even a real NSView wouldn't be enough: a CAMetalLayer on the shared view would paint over the entire window, so a macOS GPU path would need a dedicated subview managed natively (plus Retina scale handling).
+- **CoreAudio does not resample.** A stream opened at 44.1 kHz on a device that only does 16/24/48 kHz fails outright on macOS (Windows/PulseAudio silently convert). Never call `sd.InputStream`/`sd.OutputStream` directly — go through the `audio_utils` helpers and read the returned rate. Unverified on real hardware as of v1.1.3; the retry path is mock-tested.
 - **Cmd-Q must be routed through `_on_close`.** On macOS, Cmd-Q and the app menu's Quit fire Tk's `::tk::mac::Quit`, which by default exits the process without running the `WM_DELETE_WINDOW` handler — settings would silently never save. `main.py` registers `root.createcommand("::tk::mac::Quit", self._on_close)` on darwin.
 
 ## Relationship to Stohrer Sax Shop Companion
