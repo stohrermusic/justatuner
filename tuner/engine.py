@@ -124,6 +124,11 @@ class TunerEngine:
         self._stale_count = 0      # Consecutive stale reads
         self.last_error = None     # Set when stream restart fails
         self._sample_rate = SAMPLE_RATE  # Rate the open stream actually runs at
+        # perf_counter() of the last callback carrying any non-zero sample.
+        # Digital silence for seconds on end (while the stream is happily
+        # delivering) is what a denied macOS mic permission or a muted
+        # input looks like; a quiet room still has a noise floor.
+        self._last_nonzero_time = 0.0
         # Per-ring smoothed magnitudes — temporal decay like physical disc inertia
         self._smoothed_ring_mags = [[0.0] * NUM_RINGS for _ in range(12)]
         # Per-ring independent phase accumulators — each ring tracks its own
@@ -219,6 +224,7 @@ class TunerEngine:
             callback=self._audio_callback,
         )
         self._sample_rate = rate
+        self._last_nonzero_time = time.perf_counter()
         # 200 ms of audio, but never less than one FFT frame — at 16 kHz
         # (Bluetooth HFP) 200 ms is only 3200 samples.
         size = max(int(rate * BUFFER_SECONDS), FFT_SIZE)
@@ -230,6 +236,14 @@ class TunerEngine:
     def sample_rate(self):
         """Sample rate of the currently open stream (Hz)."""
         return self._sample_rate
+
+    def silent_seconds(self):
+        """Seconds since the stream last delivered a non-zero sample
+        (0.0 when not running). Exact zeros only: a live mic in a silent
+        room still produces noise-floor values."""
+        if not self._running or self._stream is None:
+            return 0.0
+        return time.perf_counter() - self._last_nonzero_time
 
     def stop(self):
         """Stop audio capture."""
@@ -251,6 +265,8 @@ class TunerEngine:
         """Sounddevice input callback (audio thread)."""
         if self._ring_buffer is not None:
             self._ring_buffer.write(indata[:, 0])
+            if indata.any():
+                self._last_nonzero_time = time.perf_counter()
 
     def analyze(self):
         """Analyze current audio buffer. Returns TunerResult.

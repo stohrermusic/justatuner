@@ -78,6 +78,7 @@ class AudioEngine:
         self.input_error = None
         self._last_input_time = 0.0     # monotonic time of last input callback
         self._last_input_attempt = 0.0  # monotonic time of last open attempt
+        self._last_nonzero_time = 0.0   # monotonic time of last non-zero sample
 
         # Instrument/detection settings
         self._fmin = 65
@@ -174,6 +175,7 @@ class AudioEngine:
             )
             self._input_stream.start()
             self._last_input_time = now
+            self._last_nonzero_time = now
             if self.input_error:
                 _log.warning("Microphone recovered (device %r, %d Hz)",
                              self._input_device, self.in_sr)
@@ -203,6 +205,15 @@ class AudioEngine:
         except Exception as e:
             _log.warning("Could not open audio output: %s", e)
             self._output_stream = None
+
+    def silent_seconds(self):
+        """Seconds since the mic last delivered a non-zero sample (0.0 when
+        the stream isn't open). Exact digital silence while the stream is
+        alive is what a denied macOS mic permission or a muted input looks
+        like; a quiet room still has a noise floor."""
+        if self._input_stream is None:
+            return 0.0
+        return time.monotonic() - self._last_nonzero_time
 
     def _check_input_health(self):
         """Reopen the mic if it never opened or its callback went quiet.
@@ -369,6 +380,8 @@ class AudioEngine:
     def _input_callback(self, indata, frames, time_info, status):
         self._last_input_time = time.monotonic()
         data = indata[:, 0].copy()
+        if data.any():
+            self._last_nonzero_time = self._last_input_time
         with self.buffer_lock:
             n = len(data)
             end = self._ring_pos + n

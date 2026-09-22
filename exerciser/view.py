@@ -27,6 +27,7 @@ from exerciser.intervals import (
 )
 from exerciser.engine import AudioEngine, INSTRUMENT_PRESETS
 from exerciser.widgets import RoundScope
+from status_lamp import StatusLamp
 from config import (get_config_dir, get_input_devices, resolve_input_device,
                     remember_input_device)
 
@@ -54,6 +55,9 @@ COLOR_AMBER = "#FFB347"
 # Below this input rate the mic is almost certainly a Bluetooth hands-free
 # link (8/16/24 kHz telephony codec, speech DSP, 100-300 ms of lag).
 LOW_QUALITY_INPUT_HZ = 32000
+# An open stream delivering only exact zeros for this long is "no signal"
+# (denied mic permission on macOS, muted input). Same as tuner/view.py.
+SILENT_WARN_S = 3.0
 COLOR_LOCKED = COLOR_PHOSPHOR
 COLOR_CLOSE = COLOR_AMBER
 COLOR_FAR = COLOR_RED
@@ -253,6 +257,7 @@ class ExerciserView:
             self.engine.stop()
         except Exception:
             pass
+        self._update_mic_status()
 
     def save_settings(self):
         """Push UI state into self.settings so the host can persist it."""
@@ -640,42 +645,44 @@ class ExerciserView:
         )
         self.drone_status.pack(anchor="w", pady=(2, 0))
 
-        # Mic health. Until v1.1.3 a mic that failed to open was reported
-        # with print() only, which the windowed build discards, so the
-        # drone tab just sat there showing "no signal" with no clue why.
+        # MIC indicator: same lamp as the tuner tab. Green good, amber
+        # warning with a line of text, dark when no mic input (the open
+        # error is shown as text because this tab has nowhere else to
+        # say why). Until v1.1.3 a mic that failed to open was reported
+        # with print() only, which the windowed build discards.
+        mic_row = tk.Frame(frame, bg=COLOR_PANEL)
+        mic_row.pack(anchor="w", pady=(8, 0))
+        self.mic_lamp = StatusLamp(mic_row, size=14, bg=COLOR_PANEL)
+        self.mic_lamp.pack(side="left", padx=(0, 5))
         tk.Label(
-            frame, text="MIC", font=("Helvetica", 8, "bold"),
+            mic_row, text="MIC", font=("Helvetica", 8, "bold"),
             fg=COLOR_CREAM_DIM, bg=COLOR_PANEL,
-        ).pack(anchor="w", pady=(6, 0))
+        ).pack(side="left")
         self.mic_status = tk.Label(
             frame, text="", font=("Helvetica", 9),
-            fg=COLOR_CREAM_DIM, bg=COLOR_PANEL,
+            fg=COLOR_AMBER, bg=COLOR_PANEL,
             justify="left", anchor="w", wraplength=260,
         )
         self.mic_status.pack(anchor="w", fill="x", pady=(2, 0))
-        self._mic_status_text = None
+        self._mic_state = None
 
     def _update_mic_status(self):
-        """Reflect engine.input_error / rate in the MIC status label."""
-        if not hasattr(self, "mic_status"):
+        """Reflect the engine's input state in the MIC lamp + text."""
+        if not hasattr(self, "mic_lamp"):
             return
-        err = self.engine.input_error
-        if err:
-            text = f"No input: {err}"
-            fg = "#FF6060"
-        elif self.engine.in_sr < LOW_QUALITY_INPUT_HZ:
-            khz = self.engine.in_sr / 1000.0
-            text = (f"Listening ({khz:g} kHz) — low quality input. "
-                    f"Bluetooth-grade mic: expect lag and coarse pitch. "
-                    f"A wired or built-in mic will do better.")
-            fg = COLOR_AMBER
+        eng = self.engine
+        err = eng.input_error
+        if not self._running or eng._input_stream is None:
+            state, text, fg = "dark", (f"No input: {err}" if err else ""), "#FF6060"
+        elif eng.silent_seconds() > SILENT_WARN_S:
+            state, text, fg = "amber", "no signal", COLOR_AMBER
+        elif eng.in_sr < LOW_QUALITY_INPUT_HZ:
+            state, text, fg = "amber", "low quality input", COLOR_AMBER
         else:
-            khz = self.engine.in_sr / 1000.0
-            rate = f"{khz:g} kHz"
-            text = f"Listening ({rate})"
-            fg = COLOR_GREEN
-        if text != self._mic_status_text:
-            self._mic_status_text = text
+            state, text, fg = "green", "", COLOR_AMBER
+        if (state, text) != self._mic_state:
+            self._mic_state = (state, text)
+            self.mic_lamp.set_state(state)
             self.mic_status.config(text=text, fg=fg)
 
     # ------------------------------------------------------------------ #
