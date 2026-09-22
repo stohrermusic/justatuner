@@ -17,3 +17,6 @@ dist/
 *.swp
 .DS_Store
 Thumbs.db
+
+# Stray logs (the app writes app.log to the config dir, not the repo)
+*.log
