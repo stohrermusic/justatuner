@@ -7,6 +7,7 @@ tuner inside JustATuner's notebook.
 """
 
 import colorsys
+import logging
 import os
 import random
 import tkinter as tk
@@ -24,9 +25,11 @@ from exerciser.intervals import (
     NOTE_NAMES, TRANSPOSITIONS,
     note_freq, analyze_interval, transpose_note_name, freq_to_note_name,
 )
-from exerciser.engine import AudioEngine, INSTRUMENT_PRESETS, list_input_devices
+from exerciser.engine import AudioEngine, INSTRUMENT_PRESETS
 from exerciser.widgets import RoundScope
-from config import get_config_dir
+from status_lamp import StatusLamp
+from config import (get_config_dir, get_input_devices, resolve_input_device,
+                    remember_input_device)
 
 
 # Frame rates
@@ -47,6 +50,14 @@ COLOR_CREAM_DIM = "#7a7060"
 COLOR_GOLD = "#c89040"
 COLOR_RED = "#cc3333"
 COLOR_GREEN = "#33cc33"
+COLOR_AMBER = "#FFB347"
+
+# Below this input rate the mic is almost certainly a Bluetooth hands-free
+# link (8/16/24 kHz telephony codec, speech DSP, 100-300 ms of lag).
+LOW_QUALITY_INPUT_HZ = 32000
+# An open stream delivering only exact zeros for this long is "no signal"
+# (denied mic permission on macOS, muted input). Same as tuner/view.py.
+SILENT_WARN_S = 3.0
 COLOR_LOCKED = COLOR_PHOSPHOR
 COLOR_CLOSE = COLOR_AMBER
 COLOR_FAR = COLOR_RED
@@ -164,6 +175,13 @@ class ExerciserView:
         # devices, but the input stream isn't started until start()).
         self.engine = AudioEngine()
         self.engine.set_instrument(self.instrument.get())
+        # Same persisted mic as the tuner tab (resolved by name, so a
+        # shuffled PortAudio index can't send us to the wrong device).
+        _dev_idx = resolve_input_device(self.settings)
+        self.engine.set_input_device(_dev_idx)
+        if _dev_idx is not None:
+            self.input_device.set(
+                self.settings.get("audio_input_device_name") or "Default")
         self.engine.set_drone(
             freq=note_freq(self.root_note, self.octave),
             voicing=self.drone_voicing,
@@ -211,9 +229,11 @@ class ExerciserView:
         try:
             self.engine.start()
         except RuntimeError as e:
-            # No sounddevice / no input device. The UI still renders;
-            # everything just shows "no signal" until audio comes back.
-            print(f"Exerciser audio error: {e}")
+            # sounddevice itself is missing. The UI still renders;
+            # everything just shows "no signal".
+            logging.warning("Exerciser audio error: %s", e)
+            self.engine.input_error = str(e)
+        self._update_mic_status()
         self._update_scope()
         self._update_analysis()
 
@@ -237,6 +257,7 @@ class ExerciserView:
             self.engine.stop()
         except Exception:
             pass
+        self._update_mic_status()
 
     def save_settings(self):
         """Push UI state into self.settings so the host can persist it."""
@@ -624,6 +645,46 @@ class ExerciserView:
         )
         self.drone_status.pack(anchor="w", pady=(2, 0))
 
+        # MIC indicator: same lamp as the tuner tab. Green good, amber
+        # warning with a line of text, dark when no mic input (the open
+        # error is shown as text because this tab has nowhere else to
+        # say why). Until v1.1.3 a mic that failed to open was reported
+        # with print() only, which the windowed build discards.
+        mic_row = tk.Frame(frame, bg=COLOR_PANEL)
+        mic_row.pack(anchor="w", pady=(8, 0))
+        self.mic_lamp = StatusLamp(mic_row, size=14, bg=COLOR_PANEL)
+        self.mic_lamp.pack(side="left", padx=(0, 5))
+        tk.Label(
+            mic_row, text="MIC", font=("Helvetica", 8, "bold"),
+            fg=COLOR_CREAM_DIM, bg=COLOR_PANEL,
+        ).pack(side="left")
+        self.mic_status = tk.Label(
+            frame, text="", font=("Helvetica", 9),
+            fg=COLOR_AMBER, bg=COLOR_PANEL,
+            justify="left", anchor="w", wraplength=260,
+        )
+        self.mic_status.pack(anchor="w", fill="x", pady=(2, 0))
+        self._mic_state = None
+
+    def _update_mic_status(self):
+        """Reflect the engine's input state in the MIC lamp + text."""
+        if not hasattr(self, "mic_lamp"):
+            return
+        eng = self.engine
+        err = eng.input_error
+        if not self._running or eng._input_stream is None:
+            state, text, fg = "dark", (f"No input: {err}" if err else ""), "#FF6060"
+        elif eng.silent_seconds() > SILENT_WARN_S:
+            state, text, fg = "amber", "no signal", COLOR_AMBER
+        elif eng.in_sr < LOW_QUALITY_INPUT_HZ:
+            state, text, fg = "amber", "low quality input", COLOR_AMBER
+        else:
+            state, text, fg = "green", "", COLOR_AMBER
+        if (state, text) != self._mic_state:
+            self._mic_state = (state, text)
+            self.mic_lamp.set_state(state)
+            self.mic_status.config(text=text, fg=fg)
+
     # ------------------------------------------------------------------ #
     #  Event handlers
     # ------------------------------------------------------------------ #
@@ -821,10 +882,11 @@ class ExerciserView:
 
     def _on_input_device_changed(self, device_index):
         self.engine.set_input_device(device_index)
+        remember_input_device(self.settings, device_index)
         if device_index is None:
             self.input_device.set("Default")
         else:
-            for idx, name in list_input_devices():
+            for idx, name in get_input_devices():
                 if idx == device_index:
                     self.input_device.set(name)
                     break
@@ -839,7 +901,7 @@ class ExerciserView:
             command=lambda: self._on_input_device_changed(None),
         )
         self._device_menu.add_separator()
-        for idx, name in list_input_devices():
+        for idx, name in get_input_devices():
             self._device_menu.add_radiobutton(
                 label=name,
                 variable=self.input_device, value=name,
@@ -935,6 +997,7 @@ class ExerciserView:
         if not self._running:
             return
         freq, confidence = self.engine.get_pitch()
+        self._update_mic_status()
         root_freq = note_freq(self.root_note, self.octave)
 
         if freq is not None and confidence > 0.2:

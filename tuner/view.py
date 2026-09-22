@@ -13,6 +13,8 @@ import math
 import functools
 import sys
 
+from status_lamp import StatusLamp
+
 IS_MACOS = sys.platform == 'darwin'
 
 try:
@@ -79,6 +81,13 @@ VU_CENTS_RANGE = 50.0            # Max cents shown on VU scale (symmetric ±)
 VU_ARC_START_DEG = 155.0         # Needle arc start angle (degrees, left side)
 VU_ARC_END_DEG = 25.0            # Needle arc end angle (degrees, right side)
 VU_RADIUS = 80                   # Radius of the VU meter arc
+
+# Below this input rate the mic is almost certainly a Bluetooth hands-free
+# link. Same threshold as exerciser/view.py's LOW_QUALITY_INPUT_HZ.
+LOW_QUALITY_INPUT_HZ = 32000
+# An open stream that has delivered nothing but exact zeros for this long
+# is treated as "no signal" (denied mic permission, muted input).
+SILENT_WARN_S = 3.0
 
 # --- Sensitivity gain mapping ---
 GAIN_MIN = 0.1                   # Gain at sensitivity=0%
@@ -741,14 +750,20 @@ class TunerView:
         # Right third — VU meter.
         vu_frame.grid(row=0, column=2, sticky="ns", padx=8)
 
+        # Meter + readout stack on the left, MIC lamp column to the right,
+        # so the lamp adds no height to the control panel.
+        vu_inner = tk.Frame(vu_frame, bg=ctrl_bg)
+        vu_inner._skip_theme = True
+        vu_inner.pack(side="left")
+
         self._vu_canvas = tk.Canvas(
-            vu_frame, width=200, height=120,
+            vu_inner, width=200, height=120,
             bg=ctrl_bg, highlightthickness=0, bd=0)
         self._vu_canvas._skip_theme = True
         self._vu_canvas.pack()
 
         # Note/cents readout below meter
-        readout = tk.Frame(vu_frame, bg=ctrl_bg)
+        readout = tk.Frame(vu_inner, bg=ctrl_bg)
         readout._skip_theme = True
         readout.pack(pady=(2, 0))
         self._vu_note_label = tk.Label(
@@ -759,6 +774,28 @@ class TunerView:
             readout, text="", bg=ctrl_bg, fg="#AAAAAA",
             font=("Helvetica", 10), width=8, anchor="w")
         self._vu_cents_label.pack(side="left")
+
+        # MIC indicator — its own lamp, apart from the motor pilot (which
+        # only says "the tuner is running"). Green: good input. Amber
+        # with a line of text: warning (Bluetooth-grade rate, or a stream
+        # that delivers only silence — the denied-mic-permission
+        # signature on macOS). Dark: no mic input. The drone tab shows
+        # the same lamp in its status panel.
+        mic_col = tk.Frame(vu_frame, bg=ctrl_bg)
+        mic_col._skip_theme = True
+        mic_col.pack(side="left", padx=(12, 0))
+        mic_row = tk.Frame(mic_col, bg=ctrl_bg)
+        mic_row._skip_theme = True
+        mic_row.pack()
+        self._tuner_mic_lamp = StatusLamp(mic_row, size=14, bg=ctrl_bg)
+        self._tuner_mic_lamp.pack(side="left", padx=(0, 5))
+        tk.Label(mic_row, text=_("MIC"), bg=ctrl_bg, fg="#888888",
+                 font=("Helvetica", 8, "bold")).pack(side="left")
+        self._tuner_mic_text = tk.Label(
+            mic_col, text="", bg=ctrl_bg, fg="#FFB347",
+            font=("Helvetica", 7), wraplength=70, justify="center")
+        self._tuner_mic_text.pack(pady=(2, 0))
+        self._tuner_mic_state = None
 
         self._vu_smooth_cents = 0.0  # for needle damping
         self._tuner_build_vu()
@@ -1218,7 +1255,8 @@ class TunerView:
         frame.pack(fill="both", expand=True)
 
         # --- Input device ---
-        from config import get_input_devices
+        from config import (get_input_devices, resolve_input_device,
+                            remember_input_device)
         devices = get_input_devices()
         if devices:
             mic_row = tk.Frame(frame, bg=bg)
@@ -1238,7 +1276,7 @@ class TunerView:
                 tk.Label(mic_row, text=_("System Default (set in system audio settings)"),
                          bg=bg, fg="#888888", font=("Helvetica", 10)).pack(side="left")
             else:
-                current_dev = self.settings.get("audio_input_device")
+                current_dev = resolve_input_device(self.settings)
                 dev_names = [_("System Default")] + [name for _, name in devices]
                 dev_indices = [None] + [idx for idx, _ in devices]
 
@@ -1261,7 +1299,7 @@ class TunerView:
                 def on_mic_changed(event=None):
                     sel = mic_combo.current()
                     dev_idx = dev_indices[sel] if sel >= 0 else None
-                    self.settings["audio_input_device"] = dev_idx
+                    remember_input_device(self.settings, dev_idx)
                     # Restart engine with new device
                     if self._tuner_engine and self._tuner_engine.is_running:
                         self._tuner_stop()
@@ -1380,7 +1418,8 @@ class TunerView:
         if not self._tuner_wheels_built:
             self._tuner_build_wheels()
 
-        device = self.settings.get("audio_input_device")
+        from config import resolve_input_device
+        device = resolve_input_device(self.settings)
         success, err = self._tuner_engine.start(device=device)
         if not success:
             if self._tuner_use_gpu and hasattr(self, '_tuner_error_lbl'):
@@ -1399,7 +1438,30 @@ class TunerView:
 
         self._tuner_running = True
         self._tuner_set_pilot(True)
+        self._tuner_update_mic_label()
         self._tuner_animate()
+
+    def _tuner_update_mic_label(self):
+        """Refresh the MIC lamp + text. Cheap enough to call every frame:
+        it only touches the widgets when the state changes (the stream
+        can reopen at a new rate on auto-restart, and silence detection
+        flips after a few seconds)."""
+        lamp = getattr(self, '_tuner_mic_lamp', None)
+        if lamp is None:
+            return
+        eng = self._tuner_engine
+        if eng is None or not self._tuner_running or eng.last_error:
+            state, text = "dark", ""
+        elif eng.silent_seconds() > SILENT_WARN_S:
+            state, text = "amber", _("no signal")
+        elif eng.sample_rate < LOW_QUALITY_INPUT_HZ:
+            state, text = "amber", _("low quality input")
+        else:
+            state, text = "green", ""
+        if (state, text) != self._tuner_mic_state:
+            self._tuner_mic_state = (state, text)
+            lamp.set_state(state)
+            self._tuner_mic_text.configure(text=text)
 
     def _tuner_stop(self):
         """Stop the tuner (audio + animation)."""
@@ -1414,6 +1476,7 @@ class TunerView:
 
         if self._tuner_engine:
             self._tuner_engine.stop()
+        self._tuner_update_mic_label()
 
         if self._tuner_player and self._tuner_player.is_playing:
             self._tuner_player.stop()
@@ -1435,6 +1498,7 @@ class TunerView:
             _t0 = _time.perf_counter()
 
             result = self._tuner_engine.analyze()
+            self._tuner_update_mic_label()
 
             _t1 = _time.perf_counter()
 
@@ -1694,6 +1758,7 @@ class TunerView:
         """Show audio stream error with a retry option."""
         self._tuner_running = False
         self._tuner_set_pilot(False)
+        self._tuner_update_mic_label()
         if self._tuner_use_gpu and hasattr(self, '_tuner_error_lbl'):
             self._tuner_error_lbl.configure(
                 text=_("{error_msg}\n\nClick here to retry").format(error_msg=error_msg),

@@ -18,7 +18,7 @@ import sys
 
 
 APP_NAME = "JustATuner"
-APP_VERSION = "1.1.2"
+APP_VERSION = "1.1.3"
 
 
 # Settings defaults. Anything read at runtime MUST exist here — the
@@ -60,11 +60,117 @@ DEFAULT_SETTINGS = {
         # config dir's recordings/ folder so they can persist by path too.
         "last_sample_path": None,
     },
-    # Audio input device (None = system default). Shared across tabs.
+    # Audio input device, shared across tabs. The *name* is the source of
+    # truth: PortAudio device indices shift whenever a USB or Bluetooth
+    # device comes or goes (constantly, on macOS), so a saved index can
+    # silently point at a different device or at nothing. The index is
+    # kept only as a cache; resolve_input_device() re-derives it from
+    # the name at startup. None = system default.
     "audio_input_device": None,
+    "audio_input_device_name": None,
     # Which tab is shown at startup
     "active_tab": "tuner",
 }
+
+
+def get_input_devices():
+    """Return list of (device_index, device_name) for usable audio input devices.
+
+    Filters out Bluetooth hands-free profiles (8/16 kHz telephony, and
+    picking one drops the headphones into low-quality mode too), Windows
+    sound-mapper aliases, and duplicate names from multiple host APIs.
+    Devices whose native rate isn't 44.1 kHz are *kept*: the engines open
+    at the device's own rate when it refuses 44.1 kHz.
+
+    Mirrors SSC's config.get_input_devices(); the tuner settings dialog
+    imports this, and its absence made Tuner > Settings... raise
+    ImportError in every release before v1.1.3.
+    """
+    try:
+        import sounddevice as sd
+        devices = []
+        seen_names = set()
+        for i, d in enumerate(sd.query_devices()):
+            if d['max_input_channels'] <= 0:
+                continue
+
+            name = d['name']
+            name_lower = name.lower()
+
+            if 'bluetooth' in name_lower or 'hands-free' in name_lower:
+                continue
+            if 'bthhfenum' in name_lower:
+                continue
+            if 'sound mapper' in name_lower:
+                continue
+            if 'primary sound' in name_lower:
+                continue
+
+            # Windows often appends truncated driver names; dedupe on the
+            # first 30 chars.
+            clean_name = name.strip()
+            dedup_key = clean_name[:30].strip()
+            if dedup_key in seen_names:
+                continue
+            seen_names.add(dedup_key)
+
+            devices.append((i, clean_name))
+        return devices
+    except Exception as e:
+        logging.warning("Could not enumerate input devices: %s", e)
+        return []
+
+
+def resolve_input_device(settings):
+    """Turn the persisted device choice into a PortAudio index (or None).
+
+    Prefers ``audio_input_device_name``: finds the input device with that
+    exact name (falling back to a prefix match, since Windows truncates
+    names differently between host APIs). If nothing matches, the device
+    isn't connected right now, so use the system default rather than an
+    index that may now belong to another device.
+
+    Migration: configs from v1.1.2 and earlier have only the integer
+    index. If that index still names a usable input device, adopt it and
+    store its name so the next launch can resolve by name.
+    """
+    name = settings.get("audio_input_device_name")
+    devices = get_input_devices()
+    if name:
+        for idx, dev_name in devices:
+            if dev_name == name:
+                settings["audio_input_device"] = idx
+                return idx
+        key = name[:30].strip()
+        for idx, dev_name in devices:
+            if dev_name[:30].strip() == key:
+                settings["audio_input_device"] = idx
+                return idx
+        logging.warning("Saved input device %r not found; using system default",
+                        name)
+        settings["audio_input_device"] = None
+        return None
+
+    legacy_idx = settings.get("audio_input_device")
+    if legacy_idx is not None:
+        for idx, dev_name in devices:
+            if idx == legacy_idx:
+                settings["audio_input_device_name"] = dev_name
+                return idx
+        settings["audio_input_device"] = None
+    return None
+
+
+def remember_input_device(settings, index):
+    """Persist a device pick (index or None) as name + cached index."""
+    settings["audio_input_device"] = index
+    name = None
+    if index is not None:
+        for idx, dev_name in get_input_devices():
+            if idx == index:
+                name = dev_name
+                break
+    settings["audio_input_device_name"] = name
 
 
 def get_config_dir():
@@ -158,5 +264,5 @@ def save_settings(settings):
             json.dump(settings, f, indent=2)
         return True
     except OSError as e:
-        print(f"Could not save settings: {e}")
+        logging.warning("Could not save settings: %s", e)
         return False

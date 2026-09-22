@@ -1,7 +1,9 @@
 """Audio engine: drone synthesis and microphone input with pitch detection."""
 
+import logging
 import os
 import threading
+import time
 import wave
 import numpy as np
 
@@ -10,13 +12,28 @@ try:
 except ImportError:
     sd = None
 
+from audio_utils import open_input_stream, open_output_stream
 from exerciser.pitch import yin_detect, moving_median_filter
 from exerciser.intervals import note_freq
 
+_log = logging.getLogger(__name__)
 
+
+# Preferred rate for both streams. Either stream may end up at a different
+# rate if the device refuses 44.1 kHz (CoreAudio doesn't resample the way
+# Windows/PulseAudio do): the mic runs at ``in_sr`` and the drone output
+# at ``sr``, and every bit of frequency math reads the matching one.
 SAMPLE_RATE = 44100
-INPUT_BLOCK = 4096     # ~93ms - enough for low notes
+INPUT_BLOCK = 4096     # ~93ms at 44.1 kHz - enough for low notes
 OUTPUT_BLOCK = 1024    # ~23ms - smooth drone output
+
+# Input stream health: if no callback has delivered audio for this long
+# the stream is presumed dead (device unplugged, default device switched
+# underneath us on macOS, PortAudio callback silently stopped) ...
+INPUT_STALE_S = 1.5
+# ... and we retry opening it, at most this often. Also paces retries
+# when the mic couldn't be opened at all, so plugging one in later works.
+INPUT_RETRY_S = 3.0
 
 # Instrument presets: (fmin, fmax, yin_threshold, confidence_threshold, description)
 INSTRUMENT_PRESETS = {
@@ -37,17 +54,6 @@ INSTRUMENT_PRESETS = {
 }
 
 
-def list_input_devices():
-    """Return list of (index, name) for available input devices."""
-    if sd is None:
-        return []
-    devices = []
-    for i, dev in enumerate(sd.query_devices()):
-        if dev["max_input_channels"] > 0:
-            devices.append((i, dev["name"]))
-    return devices
-
-
 def get_default_input_device():
     """Return index of default input device, or None."""
     if sd is None:
@@ -62,11 +68,17 @@ class AudioEngine:
     """Manages audio input (mic) and output (drone) streams."""
 
     def __init__(self):
-        self.sr = SAMPLE_RATE
+        self.sr = SAMPLE_RATE      # output (drone) rate, set when the stream opens
+        self.in_sr = SAMPLE_RATE   # input (mic) rate, set when the stream opens
         self.running = False
 
         # Input device
         self._input_device = None  # None = system default
+        # Why the mic isn't delivering, for the UI (None = healthy).
+        self.input_error = None
+        self._last_input_time = 0.0     # monotonic time of last input callback
+        self._last_input_attempt = 0.0  # monotonic time of last open attempt
+        self._last_nonzero_time = 0.0   # monotonic time of last non-zero sample
 
         # Instrument/detection settings
         self._fmin = 65
@@ -151,36 +163,78 @@ class AudioEngine:
                 pass
             self._input_stream = None
 
+        now = time.monotonic()
+        self._last_input_attempt = now
         try:
-            self._input_stream = sd.InputStream(
-                device=self._input_device,
+            self._input_stream, self.in_sr = open_input_stream(
+                sd, self._input_device, SAMPLE_RATE,
                 channels=1,
-                samplerate=self.sr,
                 blocksize=INPUT_BLOCK,
                 dtype="float32",
                 callback=self._input_callback,
             )
             self._input_stream.start()
+            self._last_input_time = now
+            self._last_nonzero_time = now
+            if self.input_error:
+                _log.warning("Microphone recovered (device %r, %d Hz)",
+                             self._input_device, self.in_sr)
+            self.input_error = None
         except Exception as e:
-            print(f"Warning: Could not open microphone: {e}")
             self._input_stream = None
+            msg = str(e).strip() or type(e).__name__
+            if msg != self.input_error:
+                # Log each distinct failure once, not once per retry.
+                _log.warning("Could not open microphone (device %r): %s",
+                             self._input_device, msg)
+            self.input_error = msg
 
     def _start_output_stream(self):
         """Start the output stream."""
         if self._output_stream is not None:
             return  # already running
         try:
-            self._output_stream = sd.OutputStream(
+            self._output_stream, self.sr = open_output_stream(
+                sd, None, SAMPLE_RATE,
                 channels=1,
-                samplerate=self.sr,
                 blocksize=OUTPUT_BLOCK,
                 dtype="float32",
                 callback=self._output_callback,
             )
             self._output_stream.start()
         except Exception as e:
-            print(f"Warning: Could not open audio output: {e}")
+            _log.warning("Could not open audio output: %s", e)
             self._output_stream = None
+
+    def silent_seconds(self):
+        """Seconds since the mic last delivered a non-zero sample (0.0 when
+        the stream isn't open). Exact digital silence while the stream is
+        alive is what a denied macOS mic permission or a muted input looks
+        like; a quiet room still has a noise floor."""
+        if self._input_stream is None:
+            return 0.0
+        return time.monotonic() - self._last_nonzero_time
+
+    def _check_input_health(self):
+        """Reopen the mic if it never opened or its callback went quiet.
+
+        Called from get_pitch() on the UI timer. The tuner engine does the
+        same via AudioRingBuffer.is_stale(); here we timestamp callbacks
+        directly. Paced by INPUT_RETRY_S so a genuinely absent device
+        doesn't hammer PortAudio.
+        """
+        if not self.running:
+            return
+        now = time.monotonic()
+        if self._input_stream is None:
+            stale = True
+        else:
+            stale = (now - self._last_input_time) > INPUT_STALE_S
+        if stale and (now - self._last_input_attempt) > INPUT_RETRY_S:
+            if self._input_stream is not None:
+                _log.warning("Microphone stream went silent for %.1fs; restarting",
+                             now - self._last_input_time)
+            self._start_input_stream()
 
     def stop(self):
         """Stop and close audio streams.
@@ -256,6 +310,7 @@ class AudioEngine:
 
     def get_pitch(self):
         """Get the latest detected pitch. Returns (freq_hz, confidence)."""
+        self._check_input_health()
         with self.buffer_lock:
             if not self.buffer_ready:
                 return self.latest_pitch, self.latest_confidence
@@ -267,7 +322,7 @@ class AudioEngine:
             buf = self._cancel_drone(buf)
 
         freq, conf = yin_detect(
-            buf, self.sr,
+            buf, self.in_sr,
             fmin=self._fmin, fmax=self._fmax,
             threshold=self._yin_threshold,
         )
@@ -297,10 +352,12 @@ class AudioEngine:
         if len(mic) > num_points:
             mic = mic[-num_points:]
 
+        # The reference sine is generated at the *mic* rate so the two
+        # traces line up sample-for-sample.
         n = len(mic)
-        t = np.arange(n) / self.sr
+        t = np.arange(n) / self.in_sr
         ref = np.sin(2 * np.pi * root_freq * t + self._ref_phase)
-        self._ref_phase = (self._ref_phase + 2 * np.pi * root_freq * n / self.sr) % (2 * np.pi)
+        self._ref_phase = (self._ref_phase + 2 * np.pi * root_freq * n / self.in_sr) % (2 * np.pi)
 
         return ref, mic
 
@@ -310,7 +367,7 @@ class AudioEngine:
         """Remove drone frequencies from mic buffer using spectral notching."""
         n = len(buf)
         spectrum = np.fft.rfft(buf)
-        freqs = np.fft.rfftfreq(n, 1.0 / self.sr)
+        freqs = np.fft.rfftfreq(n, 1.0 / self.in_sr)
 
         notch_half_width = 4.0  # Hz each side
 
@@ -321,7 +378,10 @@ class AudioEngine:
         return np.fft.irfft(spectrum, n)
 
     def _input_callback(self, indata, frames, time_info, status):
+        self._last_input_time = time.monotonic()
         data = indata[:, 0].copy()
+        if data.any():
+            self._last_nonzero_time = self._last_input_time
         with self.buffer_lock:
             n = len(data)
             end = self._ring_pos + n
@@ -463,13 +523,13 @@ class AudioEngine:
         if not chunks:
             return None
         sample = np.concatenate(chunks).astype(np.float32)
-        if len(sample) < int(self.sr * 0.2):
+        if len(sample) < int(self.in_sr * 0.2):
             return None  # too short to be useful (~200ms)
         # Normalize to peak 0.95 so quiet recordings still drive the drone.
         peak = float(np.max(np.abs(sample)))
         if peak > 0.001:
             sample = sample / peak * 0.95
-        return self._install_sample(sample, self.sr, label="recorded")
+        return self._install_sample(sample, self.in_sr, label="recorded")
 
     def record_cancel(self):
         """Drop any in-flight recording without installing it."""
@@ -484,7 +544,7 @@ class AudioEngine:
         """Approximate duration of the in-flight recording in seconds."""
         with self._recording_lock:
             total = sum(len(c) for c in self._recording_chunks)
-        return total / self.sr if self.sr else 0.0
+        return total / self.in_sr if self.in_sr else 0.0
 
     def clear_sample(self):
         """Drop the loaded sample. Drone falls back to whatever synth
