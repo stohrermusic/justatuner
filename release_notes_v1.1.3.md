@@ -66,7 +66,7 @@ Because the app isn't Apple-signed, macOS may ask for microphone access again af
 ### Known limitations
 - The strobe tuner on macOS is not GPU-accelerated — Tk on macOS doesn't expose a native view the GPU renderer can draw into, so Macs use the canvas renderer. Fully functional, just lower frame rates than the Windows/Linux GPU path.
 - GPU strobe rendering (Windows/Linux) needs a working graphics stack — on Linux that means Vulkan or OpenGL drivers. Where it can't initialize, the tuner falls back to the canvas renderer.
-- A Bluetooth headset mic works now but is a 16 kHz telephony-grade signal; the tuner's top octave is out of range at that rate and pitch detection is coarser. Any wired mic or the built-in one will do better.
+- A Bluetooth headset mic works now, but it is a telephony channel: speech codec, noise gating, and 100–300 ms of lag. Pitch range is fine (16 kHz still covers all seven tuner octaves); responsiveness and tone are not. The MIC readouts turn amber to say so. Any wired mic or the built-in one will do better.
 - Devices plugged in after the app starts don't appear in the device lists until the next launch (the audio library snapshots devices at startup). The system default still follows the OS.
 - Drone-cancellation notch on the mic helps with direct bleed but can't fully cancel speaker feedback through the room. Use headphones when the drone is on.
 - WAV-sample drone resampling sounds clean within ~an octave of the source pitch; larger shifts start to sound aliased. Record near the middle of your intended drone range.
