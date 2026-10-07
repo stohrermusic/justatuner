@@ -477,6 +477,11 @@ class TunerView:
         self._gpu_renderer = None       # tuner_render.TunerRenderer instance
         self._tuner_gpu_labels = {}     # pc_index → tk.Label (GPU mode only)
         self._tuner_gpu_fail_count = 0  # Consecutive render() failures
+        # ("audio", err) when the engine would not start, ("stream", msg)
+        # when a running stream died, None while healthy. The canvas
+        # rebuild starts with delete("all"), so the message is redrawn
+        # from this state after every rebuild (see _tuner_build_wheels_canvas).
+        self._tuner_error_state = None
 
     def create_tuner_tab(self, parent):
         """Build the Tuner tab UI."""
@@ -1096,6 +1101,14 @@ class TunerView:
 
         self._tuner_update_labels()
         self._tuner_wheels_built = True
+        # delete("all") above wiped any error message; put it back, or a user
+        # with no microphone sees dark wheels and no explanation after the
+        # first resize (first seen on SSC's Mac no-mic tour, 2026-10-06).
+        state = self._tuner_error_state
+        if state and state[0] == "audio":
+            self._tuner_draw_audio_error()
+        elif state and state[0] == "stream":
+            self._tuner_show_stream_error(state[1])
 
     # ------------------------------------------------------------------
     # SHARED HELPERS
@@ -1531,24 +1544,32 @@ class TunerView:
         device = resolve_input_device(self.settings)
         success, err = self._tuner_engine.start(device=device)
         if not success:
+            self._tuner_error_state = ("audio", err)
+            self._tuner_update_mic_label()   # lamp dark: no input
             if self._tuner_use_gpu and hasattr(self, '_tuner_error_lbl'):
                 self._tuner_error_lbl.configure(text=_("Audio error: {err}").format(err=err))
                 self._tuner_error_lbl.place(relx=0.5, rely=0.5, anchor="center")
                 self._tuner_error_lbl.lift()
             elif self._tuner_canvas:
-                self._tuner_canvas.create_text(
-                    self._tuner_canvas.winfo_width() / 2,
-                    self._tuner_canvas.winfo_height() / 2,
-                    text=_("Audio error: {err}").format(err=err),
-                    fill="#FF4444", font=("Helvetica", 12),
-                    tags="error"
-                )
+                self._tuner_draw_audio_error()
             return
 
+        self._tuner_error_state = None
         self._tuner_running = True
         self._tuner_set_pilot(True)
         self._tuner_update_mic_label()
         self._tuner_animate()
+
+    def _tuner_draw_audio_error(self):
+        """Draw the 'Audio error' message on the canvas (tag "error")."""
+        state = self._tuner_error_state
+        if not state or self._tuner_canvas is None:
+            return
+        c = self._tuner_canvas
+        c.delete("error")
+        c.create_text(c.winfo_width() / 2, c.winfo_height() / 2,
+                      text=_("Audio error: {err}").format(err=state[1]),
+                      fill="#FF4444", font=("Helvetica", 12), tags="error")
 
     def _tuner_update_mic_label(self):
         """Refresh the MIC lamp + text. Cheap enough to call every frame:
@@ -1875,6 +1896,7 @@ class TunerView:
 
     def _tuner_show_stream_error(self, error_msg):
         """Show audio stream error with a retry option."""
+        self._tuner_error_state = ("stream", error_msg)
         self._tuner_running = False
         self._tuner_set_pilot(False)
         self._tuner_update_mic_label()
