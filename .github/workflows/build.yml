@@ -11,8 +11,54 @@ permissions:
   contents: write
 
 jobs:
-  build:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - run: pip install ruff
+      - run: ruff check .
+
+  # Every suite in tools/, on all three desktop platforms. Windows and
+  # macOS runners have a display, so the GUI suites run for real there
+  # (the macOS job is the only place the darwin code paths ever execute:
+  # nobody on the project owns a Mac). Linux runs under xvfb. The runners
+  # have no microphone; the tuner runs on TunerEngine.synthetic_hz.
+  # Public repo: Actions minutes are free, so this runs on every push.
+  test:
     strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - name: Install system libraries (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libportaudio2 xvfb
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Run test suites
+        if: runner.os != 'Linux'
+        run: python tools/run_tests.py
+      - name: Run test suites (xvfb)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a python tools/run_tests.py
+
+  build:
+    # Nothing is built or attached to a release unless lint and every
+    # test job passed.
+    needs: [lint, test]
+    strategy:
+      # One platform's build failing must not cancel the others': the
+      # Mac tours and the frozen-build probes are evidence we want anyway.
       fail-fast: false
       matrix:
         include:
@@ -42,7 +88,8 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         # libportaudio2: sounddevice runtime. libx11-dev: wgpu links -lX11
         # at build time, so the GPU renderer crate needs it to link.
-        run: sudo apt-get update && sudo apt-get install -y libportaudio2 libx11-dev
+        # xvfb: the frozen-build probe and the GPU suites need a display.
+        run: sudo apt-get update && sudo apt-get install -y libportaudio2 libx11-dev xvfb
 
       - name: Install Python dependencies
         run: |
@@ -66,8 +113,102 @@ jobs:
           python -m maturin build --release --manifest-path tuner_renderer/Cargo.toml
           pip install --find-links tuner_renderer/target/wheels tuner_render
 
+      # The only place CI has the GPU wheel. Runners have a software
+      # adapter (Windows: Basic Render Driver) or no Vulkan at all (Linux),
+      # so this exercises the "software adapter / init failure -> canvas"
+      # fallbacks for real; the GPU draw path itself only runs on a
+      # machine with a GPU (Matt's).
+      - name: Tuner suites with the GPU wheel
+        if: matrix.os != 'macos-latest'
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            xvfb-run -a python tools/test_gpu_tuner.py
+            xvfb-run -a python tools/test_tuner_canvas.py
+          else
+            python tools/test_gpu_tuner.py
+            python tools/test_tuner_canvas.py
+          fi
+
       - name: Build with PyInstaller
         run: python build.py
+
+      # Frozen-build probe: launch what was just built with --selftest,
+      # which builds both tabs headless, runs the tuner on a synthetic
+      # tone and the drone tab, and exits 0/1. The one check that runs
+      # the shipped bundle rather than the source tree (missing hidden
+      # imports, a module bundled on the wrong platform). The .exe is a
+      # windowed app, so PowerShell must wait on it explicitly.
+      - name: Frozen-build probe (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:JUSTATUNER_CONFIG_DIR = "$env:RUNNER_TEMP\selftest-profile"
+          $p = Start-Process -FilePath "dist\JustATuner.exe" -ArgumentList "--selftest" -Wait -PassThru
+          Write-Host "selftest exit code: $($p.ExitCode)"
+          Get-Content "$env:JUSTATUNER_CONFIG_DIR\app.log" -ErrorAction SilentlyContinue
+          if ($p.ExitCode -ne 0) { exit $p.ExitCode }
+
+      - name: Frozen-build probe (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          JUSTATUNER_CONFIG_DIR="$RUNNER_TEMP/selftest-profile" dist/JustATuner.app/Contents/MacOS/JustATuner --selftest
+          cat "$RUNNER_TEMP/selftest-profile/app.log" || true
+
+      - name: Frozen-build probe (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          JUSTATUNER_CONFIG_DIR="$RUNNER_TEMP/selftest-profile" xvfb-run -a dist/JustATuner --selftest
+          cat "$RUNNER_TEMP/selftest-profile/app.log" || true
+
+      # Eyes on the Mac: nobody on the project owns one. The built .app
+      # walks every tab and dialog (`--tour all`), screenshots each, and
+      # the pictures are uploaded, once in light mode and once dark. The
+      # tuner runs on a synthetic tone (no microphone here). Never fails
+      # the build — it's for a human to look at.
+      - name: Screenshot tour of the running app (macOS, light + dark)
+        if: runner.os == 'macOS'
+        continue-on-error: true
+        run: |
+          mkdir -p "$RUNNER_TEMP/tour-profile" "$RUNNER_TEMP/tour" "$RUNNER_TEMP/tour-dark"
+          JUSTATUNER_CONFIG_DIR="$RUNNER_TEMP/tour-profile" dist/JustATuner.app/Contents/MacOS/JustATuner --tour all --shots "$RUNNER_TEMP/tour" &
+          for i in $(seq 1 60); do
+            [ -f "$RUNNER_TEMP/tour/tour-done.txt" ] && break
+            sleep 3
+          done
+          pkill -f JustATuner || true
+          cat "$RUNNER_TEMP/tour/tour-done.txt" || echo "tour did not finish"
+          ls -la "$RUNNER_TEMP/tour"
+          # Dark Mode. `defaults write` alone does not change the running
+          # session (SSC's first dark tour came back light, 2026-10-06), so
+          # also try the session-wide switch, and the app forces its own
+          # windows dark with --appearance dark. tour-done.txt records each
+          # shot's measured brightness: compare the dialog stops between
+          # the two runs to see which took.
+          defaults write -g AppleInterfaceStyle Dark
+          osascript -e 'tell application "System Events" to tell appearance preferences to set dark mode to true' || echo "osascript dark mode refused"
+          sleep 2
+          JUSTATUNER_CONFIG_DIR="$RUNNER_TEMP/tour-profile" dist/JustATuner.app/Contents/MacOS/JustATuner --tour all --shots "$RUNNER_TEMP/tour-dark" --appearance dark &
+          for i in $(seq 1 60); do
+            [ -f "$RUNNER_TEMP/tour-dark/tour-done.txt" ] && break
+            sleep 3
+          done
+          pkill -f JustATuner || true
+          defaults delete -g AppleInterfaceStyle || true
+          osascript -e 'tell application "System Events" to tell appearance preferences to set dark mode to false' || true
+          cat "$RUNNER_TEMP/tour-dark/tour-done.txt" || echo "dark tour did not finish"
+          cat "$RUNNER_TEMP/tour-profile/app.log" || true
+
+      - name: Upload macOS screenshot tours (light + dark)
+        if: runner.os == 'macOS'
+        continue-on-error: true
+        uses: actions/upload-artifact@v6
+        with:
+          name: mac-tour
+          path: |
+            ${{ runner.temp }}/tour/
+            ${{ runner.temp }}/tour-dark/
+          if-no-files-found: ignore
 
       - name: Verify mic permission and code signature (macOS)
         if: matrix.os == 'macos-latest'
