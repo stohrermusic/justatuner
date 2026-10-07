@@ -75,6 +75,20 @@ for d_true in (-0.45, -0.3, -0.1, 0.0, 0.1, 0.25, 0.4, 0.5):
 test(f"Hann estimator on a pure Hann lobe within 0.01 bin (worst {worst_bin:.4f} bin)",
      worst_bin < 0.01)
 
+# A note that decays during the frame broadens its lobe on both sides. The
+# one-neighbour form read a 20 ms decay on bin 40 as +0.105 bin (4.5 c at
+# A4, 18 c at A2); the two-neighbour form reads 0.000 (2026-10-06).
+worst_decay = 0.0
+for tau_s in (0.1, 0.05, 0.02):
+    env = np.exp(-_t / tau_s)
+    for d_true in (-0.01, 0.0, 0.01):
+        f = (40 + d_true) * _bin
+        mags = np.abs(np.fft.rfft(np.sin(2 * np.pi * f * _t) * env * _w))
+        got = hann_peak_freq(mags, 40, _bin) / _bin - 40
+        worst_decay = max(worst_decay, abs(got - d_true))
+test(f"Hann estimator on a decaying note (tau 100/50/20 ms) within 0.01 bin (worst {worst_decay:.4f} bin)",
+     worst_decay < 0.01)
+
 # Every semitone A1-A6 at 440-tuning, exactly in tune, through the engine.
 # Pure sine first: this is the estimator alone (old code: 15.3 c worst).
 def _sweep(lo_midi, hi_midi, make):
