@@ -90,7 +90,8 @@ test("macOS never imports tuner_render (darwin gate)", "if IS_MACOS:\n    _HAS_G
 test("no bare 'except Exception' round the GPU render() call",
      "except BaseException as e:\n                    # A Rust panic" in view_src)
 test("resize is guarded", "resize to {w}x{h} failed" in view_src)
-test("software adapter (Cpu) takes the canvas path", 'if info[2] == "Cpu":' in view_src)
+test("software adapter (Cpu, or WARP by name) takes the canvas path",
+     'if info[2] == "Cpu" or "basic render driver" in info[0].lower():' in view_src)
 test("adapter is logged at WARNING", '_log.warning("Tuner GPU renderer: %s via %s (%s), present mode %s"' in view_src)
 
 rs_src = _src("tuner_renderer", "src", "renderer.rs")

@@ -946,9 +946,12 @@ class TunerView:
                 # nothing lower): this is the line a field report needs.
                 _log.warning("Tuner GPU renderer: %s via %s (%s), present mode %s",
                              info[0], info[1], info[2], self._tuner_gpu_present_mode())
-                if info[2] == "Cpu":
-                    # A software rasterizer (Basic Render Driver, llvmpipe)
-                    # counts as no GPU: slower than the canvas and silent.
+                if info[2] == "Cpu" or "basic render driver" in info[0].lower():
+                    # A software rasterizer counts as no GPU: slower than
+                    # the canvas and silent. llvmpipe reports device_type
+                    # Cpu; Windows' WARP ("Microsoft Basic Render Driver")
+                    # reports IntegratedGpu under Dx12 (CI, 2026-10-06), so
+                    # it is caught by name.
                     self._gpu_renderer = None
                     self._tuner_gpu_fallback(f"software rasterizer only ({info[0]})")
                     return
@@ -1449,11 +1452,15 @@ class TunerView:
         bl_lbl = tk.Label(color_row, text=_("Backlight Color:"), bg=bg, fg=fg,
                           font=("Helvetica", 10))
         bl_lbl.pack(side="left", padx=(0, 8))
-        color_swatch = tk.Button(
-            color_row, text="  ", bg=self._tuner_color, width=4,
-            relief="raised", bd=1
-        )
-        color_swatch.pack(side="left")
+        # Swatches are canvases, not buttons: Aqua ignores a tk.Button's bg,
+        # so on a Mac the colour buttons were blank (CI tour, 2026-10-06).
+        def _swatch(parent, color):
+            c = tk.Canvas(parent, width=36, height=20, bg=color, bd=1,
+                          relief="raised", highlightthickness=0, cursor="hand2")
+            c.pack(side="left")
+            return c
+
+        color_swatch = _swatch(color_row, self._tuner_color)
         bl_tip = _("Color of the strobe-disc segments — the lit stripes "
                    "you see rotating on each wheel. Click the swatch to pick.")
         add_tooltip(bl_lbl, bl_tip)
@@ -1473,7 +1480,7 @@ class TunerView:
                     for wheel in self._tuner_wheels:
                         wheel.set_color(self._tuner_color)
 
-        color_swatch.configure(command=pick_stripe_color)
+        color_swatch.bind("<Button-1>", lambda e: pick_stripe_color())
 
         # --- Faceplate color ---
         fp_row = tk.Frame(frame, bg=bg)
@@ -1481,11 +1488,7 @@ class TunerView:
         fp_lbl = tk.Label(fp_row, text=_("Faceplate Color:"), bg=bg, fg=fg,
                           font=("Helvetica", 10))
         fp_lbl.pack(side="left", padx=(0, 8))
-        fp_swatch = tk.Button(
-            fp_row, text="  ", bg=self._tuner_faceplate_color, width=4,
-            relief="raised", bd=1
-        )
-        fp_swatch.pack(side="left")
+        fp_swatch = _swatch(fp_row, self._tuner_faceplate_color)
         fp_tip = _("Background color behind the strobe wheels. Click the "
                    "swatch to pick.")
         add_tooltip(fp_lbl, fp_tip)
@@ -1513,7 +1516,7 @@ class TunerView:
                     self._tuner_wheels_built = False
                     self._tuner_build_wheels()
 
-        fp_swatch.configure(command=pick_faceplate_color)
+        fp_swatch.bind("<Button-1>", lambda e: pick_faceplate_color())
 
         # --- Show FPS ---
         fps_cb = tk.Checkbutton(

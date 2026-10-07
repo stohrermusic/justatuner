@@ -573,6 +573,9 @@ def run_tour(app, shots_dir=None, step_ms=1500, on_done=None, appearance=None):
                     for name, b in zip(tour_log, brightness or [None] * len(tour_log)):
                         f.write(f"{name}" + (f"  mean brightness {b:.0f}/255" if b is not None else "") + "\n")
                     f.write(f"appearance requested: {appearance or 'system'}\n")
+                    f.write(f"window {root.winfo_width()}x{root.winfo_height()} on a "
+                            f"{root.winfo_screenwidth()}x{root.winfo_screenheight()} screen; "
+                            f"content wants {root.winfo_reqwidth()}x{root.winfo_reqheight()}\n")
                     if tour_errors:
                         f.write("ERRORS:\n" + "\n".join(tour_errors) + "\n")
             if on_done is not None:
@@ -662,7 +665,9 @@ def _selftest():
         note = app.tuner._vu_note_label.cget("text")
         if note.rstrip("0123456789") != "A":
             raise RuntimeError(f"tuner readout {note!r}, expected A")
-        renderer = "GPU" if app.tuner._tuner_use_gpu else "canvas"
+        # The wheel is only constructed on a viewable frame, never in a
+        # withdrawn root, so this says whether the GPU module is present.
+        renderer = "GPU wheel bundled" if app.tuner._tuner_use_gpu else "canvas"
 
         app.notebook.select(app.exerciser_frame)  # queued event -> drone starts, tuner stops
         root.after(1000, root.quit)
@@ -724,7 +729,13 @@ def main():
         # across runs; the Mac gets its tab row widened first.
         app = JustATunerApp(autostart=False)
         app.root.state("normal")
-        app.root.geometry("1100x760+40+60")
+        # Fit the runner's screen: the macOS runner is about 1024x768 and
+        # the WM clamped a 1100x760 request, clipping the drone tab's
+        # bottom row (first Mac tour, 2026-10-06). The size actually used
+        # is written to tour-done.txt so each picture is self-describing.
+        sw, sh = app.root.winfo_screenwidth(), app.root.winfo_screenheight()
+        w, h = min(1100, sw - 40), min(760, sh - 110)
+        app.root.geometry(f"{w}x{h}+20+40")
         _fit_window_to_tabs(app)
         # A window opened from a background process stays behind whatever
         # the user has in front; the pictures must be of the app. Topmost
