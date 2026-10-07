@@ -173,6 +173,31 @@ test("with sounddevice blocked: analyze_buffer still lights the A wheel",
 
 
 # ============================================
+# SYNTHETIC SOURCE (2026-10-06)
+# ============================================
+# TunerEngine.synthetic_hz lets the tab run with no microphone: start()
+# opens no stream, analyze() feeds the tone itself.
+print("\n--- Synthetic source ---")
+eng = TunerEngine()
+eng.synthetic_hz = 440.0
+ok, err = eng.start(device=None)
+test(f"start() succeeds with no device ({err})", ok and err is None)
+test("start() opened no stream", eng._stream is None and eng.is_running)
+test("silent_seconds() is 0 with no stream (no 'no signal' warning)", eng.silent_seconds() == 0.0)
+r = None
+for _ in range(8):           # 8 x 1024 samples > one FFT frame
+    r = eng.analyze()
+test(f"analyze() fed {eng._synth_pos} samples (phase-continuous counter advances)", eng._synth_pos == 8 * 1024)
+test("analyze() through the live path lights A", r.active[9] and r.magnitudes[9] > 0.9)
+test(f"analyze() through the live path reads A within 0.2 c ({r.cents_errors[9]:+.3f})", abs(r.cents_errors[9]) < 0.2)
+test("no stream error", eng.last_error is None)
+eng.stop()
+test("stop() clears running", not eng.is_running)
+eng2 = TunerEngine()
+test("synthetic_hz defaults to None (never set in normal use)", eng2.synthetic_hz is None)
+
+
+# ============================================
 # RESULT STRUCTURE / BASICS
 # ============================================
 print("\n--- Basics ---")
