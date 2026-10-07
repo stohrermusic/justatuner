@@ -1370,6 +1370,12 @@ class TunerView:
         dlg.resizable(False, False)
         dlg.transient(self.root)
         dlg.grab_set()
+        # Over the app, not at the screen's top-left where the WM drops a
+        # positionless Toplevel (seen in the tour screenshots, 2026-10-06).
+        try:
+            dlg.geometry(f"+{self.root.winfo_rootx() + 80}+{self.root.winfo_rooty() + 80}")
+        except tk.TclError:
+            pass
 
         bg = "systemWindowBackgroundColor" if IS_MACOS else "#F0EAD6"
         fg = "black"
@@ -1403,6 +1409,11 @@ class TunerView:
                 dev_indices = [None] + [idx for idx, _ in devices]
 
                 mic_var = tk.StringVar(value=_("System Default"))
+                # The combobox holds only the Tcl variable NAME; when this
+                # function returns, the Python StringVar is collected and
+                # tkinter unsets the Tcl variable, so the box went blank
+                # (tour screenshot, 2026-10-06). Keep it alive with the dialog.
+                dlg._mic_var = mic_var
                 if current_dev is not None:
                     for idx, name in devices:
                         if idx == current_dev:

@@ -65,7 +65,8 @@ def main(argv):
             r = subprocess.run([sys.executable, os.path.join(TOOLS, fname)], cwd=ROOT, env=env,
                                capture_output=True, text=True, encoding="utf-8", errors="replace",
                                timeout=TIMEOUT_S)
-            code, out = r.returncode, (r.stdout or "") + (r.stderr or "")
+            # stderr first so the suite's own verdict (stdout) is the last line.
+            code, out = r.returncode, (r.stderr or "") + (r.stdout or "")
         except subprocess.TimeoutExpired as e:
             code, out = 124, f"TIMEOUT after {TIMEOUT_S}s\n" + str(e.stdout or "")
         ran += 1
