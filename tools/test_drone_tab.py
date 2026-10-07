@@ -20,6 +20,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 import traceback
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -141,6 +142,65 @@ def main():
         check(f"visualizer {mode}: frames drawn, no callback exception, scope has items",
               lambda m=mode, b=before: len(tk_errors) == b and len(ex.scope.find_all()) > 0)
 
+    # ---- a progression on the synthetic tone --------------------------
+    # The tone stays E3; the root moves C -> F -> G -> C, so the interval
+    # read against it must go Major 3rd -> Major 7th -> Major 6th -> Major 3rd.
+    from exerciser.progression import PRESETS, Progression
+    ex.monitoring.set("headphones")
+    ex._on_monitoring_changed()
+    prog = Progression("test", PRESETS[0].steps, mode="seconds")
+    for s in prog.steps:
+        s.length = 0.7
+    app.notebook.select(app.exerciser_frame)
+    _run(app, 0.3)
+    ex._prog_use(prog)
+    check("the transport shows the chosen progression while idle",
+          lambda: "test" in ex.prog_label.cget("text") and "4 chords" in ex.prog_label.cget("text"))
+    ex._prog_start()
+    check("start turns the drone on and the button says Stop",
+          lambda: ex.drone_on and ex.engine.drone_on and "Stop" in ex.prog_btn.cget("text"))
+    check("count-in first (headphones: no listen)", lambda: ex._player.state == "countin" and "Count-in" in ex.prog_label.cget("text"))
+    seen = []
+    deadline = time.monotonic() + 2.0 + 4 * 0.7 + 1.0
+    while time.monotonic() < deadline:
+        _run(app, 0.15)
+        name = ex.interval_label.cget("text")
+        if name != "- - -" and (not seen or seen[-1] != name):
+            seen.append(name)
+    check(f"interval names follow the roots: {seen}",
+          lambda: seen[:4] == ["Major 3rd", "Major 7th", "Major 6th", "Major 3rd"])
+    check("root buttons follow the progression", lambda: ex.root_note in (0, 5, 7))
+    check("the transport shows current and next chord with time left",
+          lambda: "next" in ex.prog_label.cget("text") and "s" in ex.prog_label.cget("text"))
+    ex._prog_stop()
+    check("stop: button back to Start, drone still on", lambda: "Start" in ex.prog_btn.cget("text") and ex.drone_on)
+
+    # Manual mode: the key advances, typing in an Entry does not.
+    manual = Progression("manual", PRESETS[0].steps, mode="manual")
+    ex._prog_use(manual)
+    ex._prog_start()
+    _run(app, 0.2)
+    check("manual: playing at once on C", lambda: ex._player.state == "playing" and ex.root_note == 0)
+    ex.root.event_generate("<KeyPress-space>")
+    _run(app, 0.2)
+    check("manual: the space key advances to F", lambda: ex.root_note == 5)
+    entry = tk.Entry(ex.root)
+    entry.pack()
+    entry.focus_set()
+    _run(app, 0.1)
+    entry.event_generate("<KeyPress-space>")
+    _run(app, 0.2)
+    check("manual: a space typed into a text field does not advance", lambda: ex.root_note == 5)
+    entry.destroy()
+    ex._prog_next()
+    check("Next button advances to G", lambda: ex.root_note == 7)
+    ex._set_drone(False)
+    check("switching the drone off stops the progression", lambda: ex._player is None)
+    ex.save_settings()
+    check("save_settings keeps the progression and the key",
+          lambda: app.settings["exerciser_settings"]["progression"]["name"] == "manual"
+          and app.settings["exerciser_settings"]["advance_key"] == "space")
+
     # Switching back to the tuner stops the drone.
     app.notebook.select(app.tuner_frame)
     _run(app, 0.5)
@@ -150,7 +210,7 @@ def main():
     ex.save_settings()
     check("save_settings records the visualizer mode and root",
           lambda: app.settings["exerciser_settings"]["visualizer_mode"] == "Spectrum"
-          and app.settings["exerciser_settings"]["root_note"] == 0)
+          and app.settings["exerciser_settings"]["root_note"] == 7)   # the progression left it on G
     check("no Tk callback exceptions during the run", lambda: not tk_errors)
     if tk_errors:
         print(tk_errors[0])

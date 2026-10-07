@@ -62,6 +62,11 @@ DEFAULT_SETTINGS = {
         # when drone_type == "sample". Recordings are auto-saved into the
         # config dir's recordings/ folder so they can persist by path too.
         "last_sample_path": None,
+        # The last progression used on the drone tab (dict: name, text,
+        # mode, bpm, beats_per_bar) and the key that advances it in manual
+        # mode (a Tk keysym).
+        "progression": None,
+        "advance_key": "space",
     },
     # Audio input device, shared across tabs. The *name* is the source of
     # truth: PortAudio device indices shift whenever a USB or Bluetooth

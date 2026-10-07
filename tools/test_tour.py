@@ -103,7 +103,7 @@ def main():
     app.root.after(60000, app.root.quit)        # safety net
     app.root.mainloop()
     check("tour finished", lambda: "yes" in done)
-    check(f"tour visited all 12 stops ({len(log)})", lambda: len(log) == 12)
+    check(f"tour visited all 14 stops ({len(log)})", lambda: len(log) == 14)
     check(f"tour raised nothing ({errors})", lambda: not errors)
     check("no Tk callback exception during the tour", lambda: not tk_errors)
     if tk_errors:
@@ -144,6 +144,49 @@ def main():
         _run(app, 0.2)
     check("closing it clears the handle", lambda: app._latency_dialog is None)
     check("tuner still running on its tone after the dialogs", lambda: app.tuner._tuner_running)
+
+    # ---- the progression editor ----
+    app.notebook.select(app.exerciser_frame)
+    _run(app, 0.3)
+    ex = app.exerciser
+    from exerciser.progression import PRESETS
+    ex._prog_use(PRESETS[0])                     # the tour left its own progression in place
+    ex._open_progression_editor()
+    _run(app, 0.3)
+    ed = [w for w in _toplevels(app.root) if w.title() == "Drone Progression"]
+    check("Drone > Progression... opens the editor", lambda: len(ed) == 1)
+    if ed:
+        d = ex._prog_dialog
+        check("editor shows the current progression's chords", lambda: d.text_var.get() == "C | F | G | C")
+        d.pick_var.set("Preset: 12-bar blues in F")
+        d._on_pick()
+        check("picking a preset fills the fields", lambda: d.text_var.get().startswith("F7 | F7") and d.bpm_var.get() == "100")
+        d.text_var.set("C | H")
+        check("a bad chord is reported in the status line, not a dialog",
+              lambda: d.read() is None and "H" in d.status.cget("text"))
+        d.text_var.set("")
+        d.root_var.set("A")
+        d.chord_var.set("Minor 7th")
+        d.len_var.set("2")
+        d._add_chord()
+        d._add_chord()
+        check("the picker appends chord symbols", lambda: d.text_var.get() == "Am7:2 | Am7:2")
+        d.name_var.set("tour-saved")
+        d.mode_var.set("manual")
+        d._save()
+        check("Save writes progressions.json and lists it", lambda: any(v == "Saved: tour-saved" for v in d.pick["values"]))
+        d._use()
+        _run(app, 0.2)
+        check("Use applies it to the tab and closes the editor",
+              lambda: ex.progression.name == "tour-saved" and ex.progression.mode == "manual" and not d.winfo_exists())
+        ex._open_progression_editor()
+        _run(app, 0.2)
+        d = ex._prog_dialog
+        d.name_var.set("tour-saved")
+        d._delete()
+        check("Delete removes a saved progression", lambda: not any(v == "Saved: tour-saved" for v in d.pick["values"]))
+        d.destroy()
+        _run(app, 0.2)
 
     app.tuner.stop()
     app.root.destroy()

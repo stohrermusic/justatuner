@@ -129,6 +129,36 @@ SECTIONS = [
         "for understanding why some intervals (like the JI major "
         "third) feel different from the piano version.",
     ]),
+    ("Progressions", [
+        "The drone can move through a chord progression on its own, so "
+        "you practise intonation while the harmony changes under you. "
+        "Drone > Progression... opens the editor; the PROG row under the "
+        "DRONE switch starts, stops and skips.",
+        "",
+        "Pick a preset (I-IV-V-I, ii-V-I, a twelve-bar blues, the cycle "
+        "of fifths...) or type your own: a root letter with # or b, a "
+        "chord type, and an optional :length, separated by bars. For "
+        "example  C | F | G7:2 | Am. Chord types: nothing for major, m, "
+        "7 (the harmonic seventh, 7:4), maj7, m7, sus4, sus2, dim, aug, "
+        "1 for the root alone, 5 for root and fifth. The pickers add a "
+        "chord to the line for you. Save keeps it under its name; Use "
+        "puts it on the tab.",
+        "",
+        "Timing: bars at a tempo (each chord's length is in bars), "
+        "seconds per chord, or manual, where a key you choose advances "
+        "to the next chord whenever you are ready (default: the space "
+        "bar; click the key button in the editor and press the key you "
+        "want). Timed modes give you a one-bar or two-second count-in; "
+        "the PROG row shows the current chord, the next one, and the "
+        "time left. Chords are shown in your written key when TRANSPOSE "
+        "is set.",
+        "",
+        "With speakers (Exerciser Options > Monitoring), starting a "
+        "progression first sounds each chord once while the app listens "
+        "to the room, a few seconds per chord, then plays through with "
+        "no further pauses. Stay quiet during that part. A chord the "
+        "app has already heard in this session needs no second listen.",
+    ]),
     ("General", [
         "Only one tab uses the microphone at a time. Switching tabs "
         "hands the mic from one engine to the other.",

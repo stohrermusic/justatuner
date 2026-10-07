@@ -49,7 +49,9 @@ class Progression:
         if mode not in MODES:
             raise ValueError(f"mode must be one of {MODES}, not {mode!r}")
         self.name = name
-        self.steps = list(steps)
+        # Copies: a progression built from a preset's steps must not change
+        # the preset when its lengths are edited (the tour did exactly that).
+        self.steps = [Step(s.root, s.voicing, s.length) for s in steps]
         self.mode = mode
         self.bpm = float(bpm)
         self.beats_per_bar = int(beats_per_bar)

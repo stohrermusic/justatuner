@@ -555,6 +555,20 @@ def run_tour(app, shots_dir=None, step_ms=1500, on_done=None, appearance=None):
     ]
     for mode in getattr(app.exerciser, "_available_modes", ()):
         steps.append((f"drone-{mode.lower()}", open_drone_mode(mode), None))
+
+    def open_progression():
+        # Headphones mode so the stop shows chords moving, not a listen.
+        ex = app.exerciser
+        ex.monitoring.set("headphones")
+        ex._on_monitoring_changed()
+        from exerciser.progression import Progression, parse_steps
+        ex._prog_use(Progression("Tour", parse_steps("C:0.6 | F:0.6 | G:0.6 | C:0.6"), mode="seconds"))
+        ex._prog_start()
+
+    steps += [
+        ("drone-progression", open_progression, lambda: app.exerciser._prog_stop()),
+        ("progression-editor", app.exerciser._open_progression_editor, destroy_new),
+    ]
     steps += [
         ("latency-test", app._open_latency_test, destroy_new),
         ("user-guide", lambda: open_user_guide(root), destroy_new),

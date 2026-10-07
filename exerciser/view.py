@@ -10,6 +10,7 @@ import colorsys
 import logging
 import os
 import random
+import time
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
@@ -25,7 +26,9 @@ from exerciser.intervals import (
     NOTE_NAMES, TRANSPOSITIONS,
     note_freq, analyze_interval, transpose_note_name, freq_to_note_name,
 )
-from exerciser.engine import AudioEngine, INSTRUMENT_PRESETS
+from exerciser.engine import AudioEngine, INSTRUMENT_PRESETS, VOICING_LABELS
+from exerciser.progression import PRESETS, Progression, ProgressionPlayer
+from exerciser.progression_ui import ProgressionDialog
 from exerciser.widgets import RoundScope
 from status_lamp import StatusLamp
 from config import (get_config_dir, get_input_devices, resolve_input_device,
@@ -103,6 +106,16 @@ class ExerciserView:
         self.input_device = tk.StringVar(value="Default")
         self.monitoring = tk.StringVar(
             value=ex.get("monitoring", "speakers") if ex.get("monitoring") in ("speakers", "headphones") else "speakers")
+
+        # Progression: the last one used (or the first preset), the key that
+        # advances it in manual mode, and the player while one runs.
+        try:
+            self.progression = Progression.from_dict(ex["progression"]) if ex.get("progression") else PRESETS[0]
+        except (ValueError, TypeError, KeyError):
+            self.progression = PRESETS[0]
+        self.advance_key = str(ex.get("advance_key") or "space")
+        self._player = None
+        self._prog_dialog = None
 
         # Visualizer mode + scope display options. The mode dispatches
         # which _draw_* method runs each frame; the color/thickness/etc.
@@ -274,6 +287,8 @@ class ExerciserView:
             "show_et_diff": bool(self.show_et_diff.get()),
             "instrument": self.instrument.get(),
             "monitoring": self.monitoring.get(),
+            "progression": self.progression.to_dict(),
+            "advance_key": self.advance_key,
             "visualizer_mode": self.visualizer_mode.get(),
             "scope_color": self.scope_color.get(),
             "scope_trails": int(self.scope_trails.get()),
@@ -308,14 +323,16 @@ class ExerciserView:
         self._voicing_var = tk.StringVar(value=self.drone_voicing)
         voicing_menu = tk.Menu(drone_menu, tearoff=0)
         drone_menu.add_cascade(label="Voicing", menu=voicing_menu)
-        for val, label in [
-            ("root", "Root"), ("fifth", "Root + Fifth"),
-            ("major", "Major Triad"), ("minor", "Minor Triad"),
-        ]:
+        for val, label in VOICING_LABELS.items():
             voicing_menu.add_radiobutton(
                 label=label, variable=self._voicing_var, value=val,
                 command=self._on_voicing_changed,
             )
+
+        drone_menu.add_separator()
+        drone_menu.add_command(label="Progression...", command=self._open_progression_editor)
+        drone_menu.add_command(label="Start / Stop Progression", command=self._prog_toggle)
+        drone_menu.add_command(label="Next Chord", command=self._prog_next)
 
         # Sample submenu — load a WAV from disk, record a new one off
         # the mic, or drop the current sample and return to synth.
@@ -443,6 +460,7 @@ class ExerciserView:
 
         self._build_scope_panel(left_col)
         self._build_drone_row(left_col)
+        self._build_progression_row(left_col)
         self._build_interval_panel(body)
 
         tk.Frame(self._frame, bg=COLOR_GROOVE, height=1).pack(fill="x", padx=15)
@@ -736,6 +754,8 @@ class ExerciserView:
         self.drone_on = on
         self._update_drone_switch()
         self.engine.set_drone(on=on)
+        if not on and self._player is not None:
+            self._prog_stop()          # the drone is the progression's voice
         if on:
             self.drone_status.config(text="Playing", fg=COLOR_GREEN)
         else:
@@ -902,6 +922,137 @@ class ExerciserView:
         if self.engine.drone_on:
             self.engine._bleed_reset()
 
+    # ------------------------------------------------------------------ #
+    #  Progression
+    # ------------------------------------------------------------------ #
+
+    def _build_progression_row(self, parent):
+        """Transport under the drone row: Start/Stop, Next, and the current
+        and next chord (or the calibration / count-in state)."""
+        row = tk.Frame(parent, bg=COLOR_CHASSIS)
+        row.pack(pady=(0, 4))
+        tk.Label(row, text="PROG", font=("Helvetica", 7, "bold"),
+                 fg=COLOR_CREAM_DIM, bg=COLOR_CHASSIS).pack(side="left", padx=(8, 4))
+        self.prog_btn = tk.Button(
+            row, text="▶ Start", width=8, font=("Helvetica", 9, "bold"),
+            bg=COLOR_BEZEL, fg=COLOR_CREAM, relief="flat", bd=0, cursor="hand2",
+            activebackground=COLOR_GOLD, command=self._prog_toggle)
+        self.prog_btn.pack(side="left")
+        self.prog_next_btn = tk.Button(
+            row, text="⏭ Next", width=7, font=("Helvetica", 9, "bold"),
+            bg=COLOR_BEZEL, fg=COLOR_CREAM, relief="flat", bd=0, cursor="hand2",
+            activebackground=COLOR_GOLD, command=self._prog_next)
+        self.prog_next_btn.pack(side="left", padx=(4, 8))
+        self.prog_label = tk.Label(
+            row, text="", font=("Courier", 11, "bold"),
+            fg=COLOR_CREAM_DIM, bg=COLOR_CHASSIS, width=34, anchor="w")
+        self.prog_label.pack(side="left")
+        self._prog_label_text = None
+        self._prog_show_idle()
+        # The manual-advance key, wherever the focus is (not in a text field).
+        self.root.bind_all("<KeyPress>", self._on_global_key, add="+")
+
+    def _prog_show_idle(self):
+        self._prog_set_label(f"{self.progression.name}   ({len(self.progression.steps)} chords, {self.progression.mode})",
+                             COLOR_CREAM_DIM)
+
+    def _prog_set_label(self, text, fg=None):
+        if text != self._prog_label_text:
+            self._prog_label_text = text
+            self.prog_label.config(text=text, fg=fg or COLOR_CREAM)
+
+    def _open_progression_editor(self):
+        if self._prog_dialog is not None and self._prog_dialog.winfo_exists():
+            self._prog_dialog.lift()
+            return
+        self._prog_dialog = ProgressionDialog(
+            self.root, self.progression, self.advance_key, get_config_dir(),
+            on_use=self._prog_use, on_key_change=self._prog_set_key)
+
+    def _prog_set_key(self, keysym):
+        self.advance_key = keysym
+
+    def _prog_use(self, progression):
+        self._prog_stop()
+        self.progression = progression
+        self._prog_show_idle()
+
+    def _prog_toggle(self):
+        if self._player is not None and self._player.state != "stopped":
+            self._prog_stop()
+        else:
+            self._prog_start()
+
+    def _prog_start(self):
+        if not self.progression.steps:
+            return
+        if not self._running:
+            return
+        if not self.drone_on:
+            self._set_drone(True)
+        self._player = ProgressionPlayer(self.progression, self.engine, self._prog_apply_chord)
+        self._player.start(time.monotonic())
+        self.prog_btn.config(text="■ Stop", bg="#5c2e2e", fg=COLOR_RED)
+        self._prog_update_label()
+
+    def _prog_stop(self):
+        if self._player is not None:
+            self._player.stop()
+        self._player = None
+        self.prog_btn.config(text="▶ Start", bg=COLOR_BEZEL, fg=COLOR_CREAM)
+        self._prog_show_idle()
+
+    def _prog_next(self):
+        if self._player is not None and self._player.state == "playing":
+            self._player.next(time.monotonic())
+            self._prog_update_label()
+
+    def _prog_apply_chord(self, root, voicing):
+        """The player's hand on the tab: root button, voicing, engine."""
+        self.root_note = root
+        self.drone_voicing = voicing
+        if hasattr(self, "_voicing_var"):
+            self._voicing_var.set(voicing)
+        self._update_note_buttons()
+        self.engine.set_drone(freq=note_freq(self.root_note, self.octave), voicing=voicing)
+
+    def _prog_tick(self):
+        if self._player is None:
+            return
+        self._player.tick(time.monotonic())
+        self._prog_update_label()
+
+    def _prog_update_label(self):
+        if self._player is None:
+            return
+        info = self._player.info(time.monotonic(), TRANSPOSITIONS.get(self.transposition, 0))
+        st = info["state"]
+        if st == "calibrating":
+            self._prog_set_label(f"Listening to the room…  {info['current']}  ({info['cal_index'] + 1} of {info['cal_total']})", COLOR_AMBER)
+        elif st == "countin":
+            self._prog_set_label(f"Count-in {info['countin']}   then {info['current']}", COLOR_AMBER)
+        elif st == "playing":
+            nxt = f"   next {info['next']}" if info["next"] else ""
+            if info["remaining"] is not None:
+                self._prog_set_label(f"{info['current']}{nxt}   {info['remaining']:4.1f}s", COLOR_GREEN)
+            else:
+                self._prog_set_label(f"{info['current']}{nxt}   [{self.advance_key}]", COLOR_GREEN)
+        else:
+            self._prog_show_idle()
+
+    def _on_global_key(self, event):
+        """The manual-advance key: only while a progression plays, only on
+        this tab, and never while typing in a text field."""
+        if self._player is None or self._player.state != "playing" or not self._running:
+            return
+        try:
+            if event.widget.winfo_class() in ("Entry", "TEntry", "Text", "Spinbox", "TCombobox"):
+                return
+        except Exception:
+            return
+        if (event.keysym or "").lower() == self.advance_key.lower():
+            self._prog_next()
+
     def _on_voicing_changed(self):
         self.drone_voicing = self._voicing_var.get()
         self.engine.set_drone(voicing=self.drone_voicing)
@@ -1030,6 +1181,7 @@ class ExerciserView:
         freq, confidence = self.engine.get_pitch()
         self._update_mic_status()
         self._update_bleed_status()
+        self._prog_tick()
         root_freq = note_freq(self.root_note, self.octave)
 
         if freq is not None and confidence > 0.2:
