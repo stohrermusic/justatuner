@@ -12,6 +12,25 @@ JustATuner is a free cross-platform desktop tuner for musicians by [Matt Stohrer
 [ssc]: https://github.com/stohrermusic/Stohrer-Sax-Shop-Companion
 [jat]: https://github.com/stohrermusic/justatone
 
+## Traps, each paid for once — do not pay twice
+
+One dated bullet per expensive lesson, phrased as the mechanism, with the gate that now protects it. Newest first.
+
+- **2026-10-06 — A `tk.StringVar` that only a widget references is garbage-collected, and tkinter unsets the Tcl variable when it goes.** The Tuner Settings combobox stored just the variable *name*; the Python `StringVar` was a local of `_tuner_open_settings`, collected on return, and the Input Device box showed blank (tour screenshot). Keep the var on the dialog (`dlg._mic_var`). Any `textvariable` built inside a function needs an owner that outlives the function.
+- **2026-10-06 — A positionless `Toplevel` lands at the screen's top-left, not over the app.** Settings and latency dialogs now set their geometry relative to the root. Seen in the tour, where both covered the wrong window.
+- **2026-10-06 — Tk reports logical pixels; a screen grab is physical.** The Python process is not DPI-aware, so on this 250 % laptop `winfo_rootx()` is 2.5× short of the pixel the grab needs, and the first tour pictures were a corner of the browser behind the app. `run_tour()` scales the crop by the grab's width over `winfo_screenwidth()`. Also: a window opened from a background process is not raised; the tour raises it (topmost set then *cleared* — left on, it covered the non-transient user-guide window in its own shot).
+- **2026-10-06 — ttk QUEUES `<<NotebookTabChanged>>` for the initial `select()`; it fires on the next event-loop pass, whenever the binding was made.** So "bind after select" does not stop it, and the old bind-then-select-then-call-manually started the engine twice. `_on_tab_changed` ignores an event for the tab that is already active (`_active_tab_id`); `JustATunerApp(autostart=False)` therefore really starts nothing. Gated by `test_tuner_canvas` (the no-mic pass would see a live stream otherwise).
+- **2026-10-06 — Constructing the wgpu surface on a frame that is not yet viewable fails `Surface::configure` with "Invalid surface".** The tour's un-maximize + `geometry()` delivered a `<Configure>` before the toplevel was shown. `_tuner_build_wheels_gpu` returns while `winfo_viewable()` is false and the animate loop retries each frame.
+- **2026-10-06 — A Rust panic reaches Python as `pyo3_runtime.PanicException`, a `BaseException`; `except Exception` lets it into Tk's callback.** Measured: `isinstance(e, Exception)` is False. Every surface call in `tuner/view.py` catches `BaseException` (re-raising `KeyboardInterrupt`/`SystemExit`) and goes through one `_tuner_gpu_fallback(reason)`; a single bad `render()` is a dropped frame, `GPU_RENDER_FAIL_LIMIT` (30) in a row switch to the canvas; never retry the GPU on the same frame, a failed configure leaves the surface dead. Gated by `test_gpu_tuner` section 4.
+- **2026-10-06 — `Limits::downlevel_defaults()` caps textures at 2048 px; a 1400 px frame at 150 % is already past it and `Surface::configure` panics.** Measured on this PC with the old crate: 3500×1500 panicked ("maximum extent for either dimension is 2048"). Now `downlevel_defaults().using_resolution(adapter.limits())` plus `clamp_surface()` on every configure. Gated by `test_gpu_tuner` section 3.
+- **2026-10-06 — `PresentMode::Fifo` blocks `render()` on the Tk thread until vsync: 16.67 ms/frame measured.** Mailbox where the surface offers it: 0.16 ms/frame on Intel UHD / Dx12. A software rasterizer (`device_type == "Cpu"`) counts as no GPU and takes the canvas path.
+- **2026-10-06 — `canvas.delete("all")` in the wheel rebuild wiped the "Audio error" text, so a user with no microphone saw dark wheels and no explanation after the first resize.** `_tuner_error_state` is kept and redrawn at the end of every rebuild, cleared on a successful start. Gated by `test_tuner_canvas` pass 0 (2 checks fail on the old rebuild).
+- **2026-10-06 — A `root.update()` loop livelocks when a frame outlasts its `after()` interval** (SSC measured a 25 s stall in `canvas.coords`): `update()` keeps servicing the already-due reschedule and never returns. GUI suites drive frames with `root.after(ms, root.quit); root.mainloop()`, and wait for the engine's `_synth_pos` to pass ~20×1024 before reading labels (the readout is per frame, not damped).
+- **2026-10-06 — `defaults write -g AppleInterfaceStyle Dark` does not change a running login session** (SSC's first dark tour came back light). The CI dark tour also runs the `osascript` appearance switch and the app forces its own windows with `--appearance dark`; `tour-done.txt` records each shot's measured mean brightness, and since this app is dark by design the dialog stops are the ones to compare.
+- **2026-10-06 — A parabola through three linear magnitudes is the wrong shape for a Hann main lobe: up to 0.05 bin off, which on 10.77 Hz bins is 0.54 Hz, 17 c at A1.** Measured on the old engine: in-tune A1–A6 read up to +15.3 c (B1), A2 −7.8 c, A4 +1.3 c, so the strobe turned on a dead-on note. `audio_utils.hann_peak_freq` climbs ≤2 bins to the lobe top and reads d = (2a−1)/(a+1) from the larger-neighbour ratio: pure sine A1–A6 worst 0.13 c; with a −6 dB second harmonic 0.72 c at A1 (the harmonic is 5 bins up and its sidelobe lands on the fundamental's neighbours) and under 0.3 c from C2. Rejected, measured in SSC: 4× zero-padded FFT, same accuracy, 4× cost. Gated by `test_tuner_engine` (7 of 14 accuracy checks fail on the old code).
+- **2026-10-06 — One combined `try: import numpy; import sounddevice` set `np = None` whenever sounddevice was missing**, taking every pure-math path down with it. Imported separately now; `AUDIO_AVAILABLE = np is not None and sd is not None`. Gated by the child-interpreter probe in `test_tuner_engine`.
+- **2026-10-06 — `os._exit` skips Python's buffer flush**, so the selftest verdict is written with `os.write(1, …)` (guarded: a windowed .exe may have no fd 1).
+
 ## Running the Application
 
 ```bash
@@ -24,13 +43,32 @@ python main.py
 
 Dependencies: `numpy`, `sounddevice`, `pillow`, `pyinstaller` (for building). The GUI uses Python's built-in `tkinter`. Requires Python 3.11+.
 
-There is no test suite yet. The app is verified by running it with a microphone and a pair of headphones.
+## Tests
 
-## Smoke Testing Without a Test Suite
+```bash
+python tools/run_tests.py              # every tools/test_*.py, PASS/FAIL per suite
+python tools/run_tests.py engine       # suites whose name contains a word
+python tools/run_tests.py --skip gpu --allow-missing sounddevice
+python tools/test_tuner_engine.py      # one suite directly
+python main.py --selftest              # SELFTEST OK / SELFTEST FAIL, exit 0/1
+python main.py --tour all --shots DIR [--appearance dark]   # screenshot every stop
+```
+
+Each `tools/test_*.py` is a standalone script, not pytest; the runner executes each in its own interpreter from the repo root (same as SSC). Three suites as of 2026-10-06:
+
+- `test_tuner_engine` — pure math, no display: the Hann estimator on a pure lobe (<0.01 bin), in-tune A1–A6 sweeps (pure sine <0.5 c; with a −6 dB H2 <1.0 c, C2–A6 <0.5 c), off-pitch A2–A5 within 0.15 c, the strobe standing still on an in-tune note, B5 26 c flat, numpy surviving a blocked sounddevice (child interpreter), and the synthetic source through `analyze()`.
+- `test_gpu_tuner` — the `tuner_render` API, the renderer.rs / view.py source contract, a 3500×1500 surface, `adapter_info` / `present_mode`, 60 frames timed, and the 30-failure fallback on the real app. Skips the wheel-dependent parts when the wheel is not built (set `JUSTATUNER_REQUIRE_GPU=1` on a machine that built it to make a broken wheel fail loudly) and the construction cases on a runner with no GPU surface.
+- `test_tuner_canvas` — the real tab end to end: pass 0 no mic (error text drawn and surviving a rebuild, MIC lamp dark), pass 1 canvas mode on the synthetic tone (12 wheels, A brightest, readout A / IN TUNE, lamp green, 0 c through the live path), pass 2 the GPU build (live renderer with zero failures, or the designed fallback with the CPU-mode notice).
+
+Rules the suites follow, each from a trap above: an isolated profile via **`JUSTATUNER_CONFIG_DIR`** set before `config` is imported (never the user's settings); `builtins._` installed before importing `tuner.view`; `tkinter.messagebox` stubbed so the exception hook's dialog cannot block; **`JustATunerApp(autostart=False)`** so the test sets `synthetic_hz` before the first start and starts via `app._on_tab_changed()`; frames driven with `root.after(ms, root.quit); root.mainloop()`, never a `root.update()` loop; `check()` fails on a returned `False` as well as on an exception.
+
+**`--selftest`** (`_selftest()` in main.py) builds both tabs in a withdrawn root, runs the tuner on the synthetic tone (≥20 frames, readout A, no error state), switches to the drone tab (real mic path; no input is reported, not failed), and exits 0/1 without saving. CI runs it against the frozen binary on every platform — the one check that runs the shipped bundle. **`--tour all --shots DIR`** (`run_tour()`) walks 12 stops — tuner with the real mic, tuner on the tone, Tuner Settings, the drone tab in all six visualizer modes, the latency dialog, the user guide — screenshots each cropped to the app's windows, and writes `tour-done.txt` with each shot's mean brightness and any step errors. Help > About is a native messagebox and is not toured. Modal stops work because each stop's finish is scheduled with `after()` before its open is called. The macOS build job runs the tour light and dark and uploads `mac-tour`; those pictures are how the Mac UI gets reviewed. Driven on this PC (2026-10-06, 12 shots, three findings fixed); not yet seen on a Mac.
+
+## Smoke Testing Patterns
 
 Patterns that caught real bugs during the v1.1.3 work; use them before claiming a UI or audio change works:
 
-- **Drive the real app on a hidden root.** `app = main.JustATunerApp(); app.root.withdraw()` then pump `root.update()` in a loop. Select tabs with `app.notebook.select(app.exerciser_frame)`, poke engine state, read widgets. Withdrawing avoids flashing a window at whoever is watching the screen (and them closing it mid-test). Widget sizes are still available via `winfo_reqheight()`.
+- **Drive the real app on a hidden root.** `app = main.JustATunerApp(autostart=False); app.root.withdraw()`, then drive frames with `app.root.after(ms, app.root.quit); app.root.mainloop()` (not a `root.update()` loop — see the traps). Select tabs with `app.notebook.select(app.exerciser_frame)` (the queued tab event starts that tab), poke engine state, read widgets. Withdrawing avoids flashing a window at whoever is watching the screen (and them closing it mid-test). Widget sizes are still available via `winfo_reqheight()`; wheels are not built while the frame is unviewable, but the readout labels still update.
 - **Monkeypatch `tkinter.messagebox`** (`showerror`/`showinfo`/`showwarning` to print) before importing `main`, or the exception hook's error dialog blocks the update loop forever.
 - **Open the lazy-import dialogs.** `tuner/view.py`'s settings dialog imports `config.get_input_devices` and `ui_dialogs.add_tooltip` *inside* `_tuner_open_settings`, so `import tuner.view` succeeding proves nothing; two releases shipped with the dialog raising ImportError. Call `app.tuner._tuner_open_settings()` and confirm a `Tuner Settings` Toplevel appears.
 - **Mock sounddevice for the macOS-only paths.** Windows MME accepts any sample rate (it resamples), so the CoreAudio "Invalid sample rate" fallback never fires here. Set `tuner.engine.sd = FakeSD` where `FakeSD.InputStream` raises on 44100 and `query_devices` reports a 16 kHz default, then feed `engine._ring_buffer.write(sine)` and check `analyze()` lights the right wheel.
@@ -69,13 +107,18 @@ The key alone is **not sufficient**: PyInstaller ad-hoc signs the bundle during 
 ```
 main.py                 → Tk root + two-tab Notebook + on_tab_changed engine
                           swap; exception hooks (sys.excepthook + Tk
-                          report_callback_exception → app.log + error dialog)
+                          report_callback_exception → app.log + error dialog);
+                          --selftest (_selftest) and --tour all (run_tour)
 config.py               → DEFAULT_SETTINGS, settings I/O, per-platform config
-                          dir, setup_logging() (rotating app.log),
+                          dir (JUSTATUNER_CONFIG_DIR overrides it for tests),
+                          setup_logging() (rotating app.log),
                           get_input_devices() + resolve/remember_input_device()
-audio_utils.py          → AudioRingBuffer + open_input_stream()/
-                          open_output_stream() sample-rate fallback helpers
-                          (shared by both audio engines)
+audio_utils.py          → AudioRingBuffer, hann_peak_freq() (Hann closed-form
+                          peak estimator), synthetic_tone() (test source), and
+                          open_input_stream()/open_output_stream() sample-rate
+                          fallback helpers (shared by both audio engines)
+tools/run_tests.py      → runs every tools/test_*.py (see Tests)
+tools/test_*.py         → test_tuner_engine, test_gpu_tuner, test_tuner_canvas
 audio_latency.py        → Help > Test Audio Latency…: loopback round-trip
                           measurement (chirps out, cross-correlate mic);
                           pure numpy + sounddevice, dialog lives in main.py
@@ -142,6 +185,10 @@ installer.iss           → Inno Setup script for Windows installer
 ### Tuner engine (`tuner/engine.py`)
 
 12 chromatic pitch classes, each with seven concentric rings (one per octave). FFT-based pitch detection with per-pitch-class phase tracking — phase deviation drives the stroboscopic rotation effect. Magnitude normalization is gated: `max_mag` must exceed `threshold * 1.5` before normalizing to 0–1, otherwise all magnitudes are zeroed. This prevents sensitive mics from showing wheel activity on room noise.
+
+Peak frequency (both the per-ring estimate and the strongest-octave estimate that drives the VU and the wheel phase) comes from `audio_utils.hann_peak_freq`, the Hann closed form — not a parabola, which read in-tune low notes up to 15 c off (see the traps). Magnitudes are read as before.
+
+`synthetic_hz` (default None) is the test/CI source: when set, `start()` opens no stream, sizes the ring buffer itself, and `analyze()` feeds `audio_utils.synthetic_tone` (fundamental + −6 dB H2, phase-continuous from `_synth_pos`) before the stale check. `silent_seconds()` stays 0 (no stream), so the MIC lamp reads green. Nothing in normal use sets it.
 
 Audio stream health monitoring via `AudioRingBuffer.is_stale()` — if no new audio data arrives for ~1 second, the engine restarts the sounddevice stream. Recovers from silent callback death on Windows. The ring buffer is sized at open to `max(rate × 0.2 s, FFT_SIZE)` so a 16 kHz stream still fills one FFT frame.
 
@@ -321,6 +368,8 @@ Before the PyInstaller step, the Windows and Linux runners install the Rust tool
 
 Triggers: push to `main` or `beta`, release `created`, manual `workflow_dispatch`. On release events, the `softprops/action-gh-release@v2` step attaches each platform's artifact to the release page (bumped from `@v1`, which ran on the soon-to-be-removed Node 20).
 
+Since 2026-10-06 the build job is preceded by a **`lint`** job (`ruff check .`, config in `ruff.toml`) and a **`test`** job running `tools/run_tests.py` on windows-latest, macos-latest and ubuntu-latest (under `xvfb-run`); `build` has `needs: [lint, test]` and `fail-fast: false`. The Windows and Linux build jobs run `test_gpu_tuner` and `test_tuner_canvas` with the freshly built wheel (runners have a software adapter or no Vulkan, so that exercises the fallback to canvas for real). After PyInstaller each build job runs the frozen binary with **`--selftest`** against an isolated `JUSTATUNER_CONFIG_DIR`. The macOS build job runs **`--tour all`** twice (light, then dark via `defaults write` + the `osascript` appearance switch + `--appearance dark`) and uploads both as the `mac-tour` artifact with `continue-on-error`. Look at those pictures after a Mac-affecting change; they are the only eyes on the Mac. Blind spots no runner reaches: the mic permission prompt itself, Retina scaling, display scaling above 100 % on Windows, real audio devices, Gatekeeper's first launch.
+
 ## Config File Location
 
 User settings live in `app_settings.json` at:
@@ -340,7 +389,7 @@ Top-level keys: `tuner_settings` (dict), `exerciser_settings` (dict), `audio_inp
 - **Apple Silicon only on macOS** — `sounddevice`'s Intel wheel doesn't reliably bundle PortAudio. JustATuner is audio-only, so an Intel build with no audio isn't worth shipping. README points Intel Mac users at `brew install portaudio` + From-Source.
 - **No code signing on any platform**. Windows uses SmartScreen "Run anyway" + UAC; macOS needs `xattr -cr` to clear the quarantine flag; Linux needs `chmod +x`. README documents all three.
 - **macOS mic permission must be declared in the bundle — and the bundle must be re-signed after patching it.** `build.py`'s `_patch_macos_plist()` adds `NSMicrophoneUsageDescription` to the `.app` Info.plist post-build; without it macOS silently denies microphone access. v1.0.0 shipped without it (an extraction regression). But patching the plist after PyInstaller's ad-hoc signing breaks the signature seal, and TCC also silently denies (never prompts) when the signature doesn't validate — so v1.1.0/v1.1.1 had the key yet still never asked for the mic. `_resign_macos_app()` re-signs after the patch, and CI packages with symlink-preserving `ditto` (not `zip -r`) and runs `codesign --verify --deep --strict` on both the built app and the unzipped artifact. Users upgrading from a broken build may need `tccutil reset Microphone com.stohrer.justatuner` if macOS cached a denial.
-- **GPU tuner renderer is built in CI** (v1.1.0+), **Windows and Linux only**. The Rust/wgpu `tuner_render` crate lives in `tuner_renderer/` (copied from SSC); maturin builds it on those runners and `build.py`'s `--hidden-import` capability check bundles it, with `tuner/view.py` falling back to the Tk canvas renderer when it's absent. **v1.0.0 shipped without it** — the extraction brought over the Python integration in `tuner/view.py` but not the crate or the build wiring, so end users got canvas-only while a stray local `tuner_render` install masked the gap in dev. Fixed in v1.1.0.
+- **GPU tuner renderer is built in CI** (v1.1.0+), **Windows and Linux only**. The Rust/wgpu `tuner_render` crate lives in `tuner_renderer/` (copied from SSC); maturin builds it on those runners and `build.py`'s `--hidden-import` capability check bundles it, with `tuner/view.py` falling back to the Tk canvas renderer when it's absent. **v1.0.0 shipped without it** — the extraction brought over the Python integration in `tuner/view.py` but not the crate or the build wiring, so end users got canvas-only while a stray local `tuner_render` install masked the gap in dev. Fixed in v1.1.0. Since 2026-10-06 the renderer asks for the adapter's real texture limits (not the 2048 px downlevel cap), clamps every configure, presents with Mailbox where offered (0.16 ms/frame vs 16.67 for Fifo), exposes `adapter_info()` / `present_mode()`, and the view treats a `Cpu` adapter as no GPU; every surface call is guarded against the pyo3 `PanicException` (a `BaseException`) and routed through `_tuner_gpu_fallback`. A local `python -m maturin build --release --manifest-path tuner_renderer/Cargo.toml` then `pip install --force-reinstall --no-deps tuner_renderer/target/wheels/tuner_render-*.whl` is how the dev box gets the current crate; the installed wheel is otherwise whatever was built last (SSC's and this repo's crates share the module name).
 - **macOS is canvas-only — never load `tuner_render` on darwin.** Tk Aqua draws all widgets into a single NSView per toplevel, and `winfo_id()` returns an internal `MacDrawable` pointer ("the value has no meaning outside Tk" — Tk docs), not an NSView. `tuner_renderer/src/platform.rs` treats the handle as an NSView, so wgpu's Metal backend segfaults in `objc_msgSend` during surface creation — a native crash the Python `except` fallback in `tuner/view.py` can never catch. Three layers enforce this: `tuner/view.py` skips the `tuner_render` import on darwin, `build.py` skips the `--hidden-import` on darwin, and CI skips the Rust build on the macOS runner. The v1.1.0 macOS zip shipped with the renderer bundled and likely crashed at launch. Even a real NSView wouldn't be enough: a CAMetalLayer on the shared view would paint over the entire window, so a macOS GPU path would need a dedicated subview managed natively (plus Retina scale handling).
 - **CoreAudio does not resample.** A stream opened at 44.1 kHz on a device that only does 16/24/48 kHz fails outright on macOS (Windows/PulseAudio silently convert). Never call `sd.InputStream`/`sd.OutputStream` directly — go through the `audio_utils` helpers and read the returned rate. Unverified on real hardware as of v1.1.3; the retry path is mock-tested.
 - **Cmd-Q must be routed through `_on_close`.** On macOS, Cmd-Q and the app menu's Quit fire Tk's `::tk::mac::Quit`, which by default exits the process without running the `WM_DELETE_WINDOW` handler — settings would silently never save. `main.py` registers `root.createcommand("::tk::mac::Quit", self._on_close)` on darwin.
