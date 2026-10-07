@@ -101,6 +101,8 @@ class ExerciserView:
         # Input options
         self.instrument = tk.StringVar(value=ex.get("instrument", "Auto"))
         self.input_device = tk.StringVar(value="Default")
+        self.monitoring = tk.StringVar(
+            value=ex.get("monitoring", "speakers") if ex.get("monitoring") in ("speakers", "headphones") else "speakers")
 
         # Visualizer mode + scope display options. The mode dispatches
         # which _draw_* method runs each frame; the color/thickness/etc.
@@ -175,6 +177,7 @@ class ExerciserView:
         # devices, but the input stream isn't started until start()).
         self.engine = AudioEngine()
         self.engine.set_instrument(self.instrument.get())
+        self.engine.monitoring = self.monitoring.get()
         # Same persisted mic as the tuner tab (resolved by name, so a
         # shuffled PortAudio index can't send us to the wrong device).
         _dev_idx = resolve_input_device(self.settings)
@@ -270,6 +273,7 @@ class ExerciserView:
             "drone_volume": self.drone_volume,
             "show_et_diff": bool(self.show_et_diff.get()),
             "instrument": self.instrument.get(),
+            "monitoring": self.monitoring.get(),
             "visualizer_mode": self.visualizer_mode.get(),
             "scope_color": self.scope_color.get(),
             "scope_trails": int(self.scope_trails.get()),
@@ -350,6 +354,18 @@ class ExerciserView:
         input_menu.add_command(
             label="Refresh Devices", command=self._refresh_device_menu,
         )
+
+        # Speakers: the drone leaks into the mic, so the engine listens to
+        # the room for a few seconds whenever the drone starts and cancels
+        # the bleed. Headphones: nothing to cancel, no listen.
+        mon_menu = tk.Menu(options_menu, tearoff=0)
+        options_menu.add_cascade(label="Monitoring", menu=mon_menu)
+        mon_menu.add_radiobutton(
+            label="Speakers  (listen to the room, cancel the drone from the mic)",
+            variable=self.monitoring, value="speakers", command=self._on_monitoring_changed)
+        mon_menu.add_radiobutton(
+            label="Headphones  (no cancellation)",
+            variable=self.monitoring, value="headphones", command=self._on_monitoring_changed)
 
         viz_menu = tk.Menu(options_menu, tearoff=0)
         options_menu.add_cascade(label="Visualizer", menu=viz_menu)
@@ -666,6 +682,16 @@ class ExerciserView:
         self.mic_status.pack(anchor="w", fill="x", pady=(2, 0))
         self._mic_state = None
 
+    def _update_bleed_status(self):
+        """DRONE status line: "Listening to the room..." while the engine
+        measures the drone's bleed, "Playing" once it is cancelling."""
+        if not self.drone_on:
+            return
+        status = self.engine.bleed_status()
+        text = "Listening to the room…" if status == "listening" else "Playing"
+        if self.drone_status.cget("text") != text:
+            self.drone_status.config(text=text, fg=COLOR_AMBER if status == "listening" else COLOR_GREEN)
+
     def _update_mic_status(self):
         """Reflect the engine's input state in the MIC lamp + text."""
         if not hasattr(self, "mic_lamp"):
@@ -871,6 +897,11 @@ class ExerciserView:
         self._current_sample_path = path
         messagebox.showinfo("Sample saved", f"Saved to:\n{path}", parent=self.root)
 
+    def _on_monitoring_changed(self):
+        self.engine.monitoring = self.monitoring.get()
+        if self.engine.drone_on:
+            self.engine._bleed_reset()
+
     def _on_voicing_changed(self):
         self.drone_voicing = self._voicing_var.get()
         self.engine.set_drone(voicing=self.drone_voicing)
@@ -998,6 +1029,7 @@ class ExerciserView:
             return
         freq, confidence = self.engine.get_pitch()
         self._update_mic_status()
+        self._update_bleed_status()
         root_freq = note_freq(self.root_note, self.octave)
 
         if freq is not None and confidence > 0.2:

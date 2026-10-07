@@ -134,9 +134,16 @@ SECTIONS = [
         "hands the mic from one engine to the other.",
         "",
         "Input device: pick a specific mic from the Input menu in "
-        "either tab. Headphones are strongly recommended when the "
-        "drone is on — open speakers will feed the drone back into "
-        "the mic and confuse the pitch detector.",
+        "either tab.",
+        "",
+        "Speakers or headphones (Exerciser Options > Monitoring): with "
+        "speakers, the drone leaks into the mic, so whenever the drone "
+        "starts or changes note the app listens to the room for a few "
+        "seconds (the DRONE status says so) and then cancels the drone "
+        "from what the mic hears. Stay quiet during the listen. With "
+        "headphones there is nothing to cancel, so choose Headphones "
+        "and there is no listen at all. A WAV-sample drone can't be "
+        "cancelled this way; use headphones with it.",
         "",
         "Settings persist between sessions in app_settings.json "
         "under your platform's config directory (%APPDATA%, "

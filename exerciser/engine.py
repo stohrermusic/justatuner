@@ -36,6 +36,24 @@ INPUT_STALE_S = 1.5
 # when the mic couldn't be opened at all, so plugging one in later works.
 INPUT_RETRY_S = 3.0
 
+# Drone cancellation when the drone plays through speakers (monitoring
+# "speakers"). The app generates the drone, so each partial arrives at the
+# mic as the same tone with one amplitude and one phase: one complex gain
+# per partial. When the drone starts (or changes note), the engine waits
+# for it to reach the mic, listens for BLEED_LISTEN_S with the player
+# presumed silent, fits each partial's gain and its phase drift (the mic
+# and speaker streams run on separate clocks: 2.6 ppm here, 0.1-0.7 deg/s),
+# then subtracts the predicted bleed from every buffer. The gains keep
+# tracking only while no pitch is detected, so a held unison is never
+# learned as bleed. All timing is in input-sample time, so tests run
+# faster than real time. Measured 2026-10-07; see tools/test_drone_cancel.py.
+BLEED_SETTLE_S = 0.4
+BLEED_LISTEN_S = 3.0
+BLEED_TRACK_TAU_S = 4.0
+BLEED_PAUSE_S = 1.0
+MONITORING_SPEAKERS = "speakers"
+MONITORING_HEADPHONES = "headphones"
+
 # Instrument presets: (fmin, fmax, yin_threshold, confidence_threshold, description)
 INSTRUMENT_PRESETS = {
     "Auto":            (65,  2500, 0.25, 0.20, "Automatic detection"),
@@ -98,6 +116,17 @@ class AudioEngine:
         self._ring_size = INPUT_BLOCK * 2  # ~186ms of audio
         self._ring_buf = np.zeros(self._ring_size)
         self._ring_pos = 0
+        self._in_total = 0            # samples ever pushed: the cancellation's time base
+
+        # Drone-bleed cancellation state (see the BLEED_* constants).
+        self.monitoring = MONITORING_SPEAKERS
+        self._bleed_state = "idle"    # idle | settle | listen | ready
+        self._bleed_t0 = 0.0          # input-sample time the current phase began
+        self._bleed_obs = []          # (t, gains array) collected while listening
+        self._bleed_gain = None       # complex gain per partial at _bleed_tref
+        self._bleed_slope = None      # phase drift per partial, rad/s
+        self._bleed_tref = 0.0
+        self._bleed_last_pitch_t = 0.0
         self.buffer_lock = threading.Lock()
         self.buffer_ready = False
         self.pitch_history = []
@@ -315,6 +344,10 @@ class AudioEngine:
         """Update drone parameters. Pass only what changed."""
         rebuild = False
         if on is not None:
+            if on and not self.drone_on:
+                self._bleed_reset()
+            elif not on:
+                self._bleed_state = "idle"
             self.drone_on = on
             self._target_amp = self.drone_volume if on else 0.0
         if freq is not None and freq != self.drone_freq:
@@ -342,11 +375,14 @@ class AudioEngine:
             if not self.buffer_ready:
                 return self.latest_pitch, self.latest_confidence
             buf = np.roll(self._ring_buf, -self._ring_pos).copy()
+            t_start = (self._in_total - self._ring_size) / float(self.in_sr)
             self.buffer_ready = False
 
-        # Cancel drone frequencies from mic signal before pitch detection
+        # Cancel the drone from the mic signal before pitch detection
         if self.drone_on and self._osc_freqs:
-            buf = self._cancel_drone(buf)
+            buf = self._cancel_drone(buf, t_start)
+            if buf is None:            # still listening to the room
+                return None, 0.0
 
         freq, conf = yin_detect(
             buf, self.in_sr,
@@ -355,6 +391,7 @@ class AudioEngine:
         )
 
         if freq is not None and conf > self._conf_threshold:
+            self._bleed_last_pitch_t = t_start
             self.pitch_history.append(freq)
             if len(self.pitch_history) > 15:
                 self.pitch_history = self.pitch_history[-15:]
@@ -388,21 +425,113 @@ class AudioEngine:
 
         return ref, mic
 
-    # -- Internal --
+    # -- Drone-bleed cancellation --
 
-    def _cancel_drone(self, buf):
-        """Remove drone frequencies from mic buffer using spectral notching."""
+    def bleed_status(self):
+        """"off" (headphones, drone off, or a sample drone), "listening"
+        while the room is being measured, "ready" while cancelling."""
+        if not self.drone_on or self.monitoring != MONITORING_SPEAKERS \
+                or self.drone_type == "sample" or not self._osc_freqs:
+            return "off"
+        return "ready" if self._bleed_state == "ready" else "listening"
+
+    def _bleed_reset(self):
+        """Start a fresh listen: the drone just started or changed note, so
+        every partial's phase at the mic is new."""
+        self._bleed_state = "settle"
+        self._bleed_t0 = self._in_total / float(self.in_sr)
+        self._bleed_obs = []
+        self._bleed_gain = None
+        self._bleed_slope = None
+
+    def _bleed_project(self, buf, t_start, freqs):
+        """Complex amplitude of each partial in buf (Hann-windowed), and the
+        matrix of references so the caller can rebuild the bleed."""
+        n = len(buf)
+        t = t_start + np.arange(n) / float(self.in_sr)
+        refs = np.exp(-2j * np.pi * np.asarray(freqs)[:, None] * t[None, :])
+        w = np.hanning(n)
+        c = refs @ (buf * w) / w.sum()
+        return c, refs
+
+    def _cancel_drone(self, buf, t_start):
+        """Remove the drone from the mic buffer. Returns the cleaned buffer,
+        or None while the room is still being listened to.
+
+        Speakers: subtract each partial's predicted bleed (gain and phase
+        drift learned during the listen, tracked during the player's
+        pauses). Headphones: nothing to remove. Sample drone: the old
+        +-4 Hz spectral notch, since a sample is not a known set of partials.
+        """
+        if self.monitoring == MONITORING_HEADPHONES:
+            return buf
+        if self.drone_type == "sample":
+            return self._notch_drone(buf)
+
+        freqs = [f for f, _ in self._osc_freqs]
+        t_mid = t_start + 0.5 * len(buf) / float(self.in_sr)
+        c, refs = self._bleed_project(buf, t_start, freqs)
+
+        if self._bleed_state == "idle":
+            self._bleed_reset()
+        if self._bleed_state == "settle":
+            if t_mid - self._bleed_t0 < BLEED_SETTLE_S:
+                return None
+            self._bleed_state = "listen"
+            self._bleed_t0 = t_mid
+        if self._bleed_state == "listen":
+            self._bleed_obs.append((t_mid, c))
+            if t_mid - self._bleed_t0 < BLEED_LISTEN_S:
+                return None
+            self._bleed_fit()
+            self._bleed_state = "ready"
+
+        # Predicted bleed at this buffer's time, then subtract it.
+        dt = t_mid - self._bleed_tref
+        pred = self._bleed_gain * np.exp(1j * self._bleed_slope * dt)
+        cleaned = buf - 2.0 * np.real(pred @ np.conj(refs))
+
+        # Track the gains only while the player is silent, so a held note
+        # at the drone's own pitch is never learned as bleed.
+        if t_mid - self._bleed_last_pitch_t > BLEED_PAUSE_S and self.latest_pitch is None:
+            alpha = min(1.0, (len(buf) / float(self.in_sr)) / BLEED_TRACK_TAU_S)
+            measured = c * np.exp(-1j * self._bleed_slope * dt)
+            self._bleed_gain = self._bleed_gain + alpha * (measured - self._bleed_gain)
+        return cleaned
+
+    def _bleed_fit(self):
+        """Fit each partial's complex gain and phase-drift rate from the
+        observations collected during the listen."""
+        ts = np.array([t for t, _ in self._bleed_obs])
+        cs = np.array([c for _, c in self._bleed_obs])       # (n_obs, K)
+        self._bleed_tref = float(ts.mean())
+        k = cs.shape[1]
+        gain = np.zeros(k, dtype=complex)
+        slope = np.zeros(k)
+        for i in range(k):
+            ph = np.unwrap(np.angle(cs[:, i]))
+            if len(ts) >= 3:
+                s, b = np.polyfit(ts - self._bleed_tref, ph, 1)
+            else:
+                s, b = 0.0, float(np.mean(ph))
+            slope[i] = s
+            gain[i] = float(np.mean(np.abs(cs[:, i]))) * np.exp(1j * b)
+        self._bleed_gain = gain
+        self._bleed_slope = slope
+
+    def _notch_drone(self, buf):
+        """Remove drone frequencies with a +-4 Hz spectral notch (sample
+        drones only: not a known set of partials). Leaks: the drone itself
+        still reads as a unison through it, and a third over bleed reads
+        -12 c (measured 2026-10-06); headphones are the answer there."""
         n = len(buf)
         spectrum = np.fft.rfft(buf)
         freqs = np.fft.rfftfreq(n, 1.0 / self.in_sr)
-
-        notch_half_width = 4.0  # Hz each side
-
         for osc_freq, _ in self._osc_freqs:
-            mask = np.abs(freqs - osc_freq) < notch_half_width
-            spectrum[mask] = 0
-
+            spectrum[np.abs(freqs - osc_freq) < 4.0] = 0
         return np.fft.irfft(spectrum, n)
+
+    # -- Internal --
 
     def _input_callback(self, indata, frames, time_info, status):
         self._push_input(indata[:, 0].copy())
@@ -423,6 +552,7 @@ class AudioEngine:
                 self._ring_buf[self._ring_pos:] = data[:split]
                 self._ring_buf[:n - split] = data[split:]
             self._ring_pos = end % self._ring_size
+            self._in_total += n
             self.buffer_ready = True
         with self._lissajous_lock:
             self._lissajous_mic = data
@@ -746,6 +876,8 @@ class AudioEngine:
 
         self._osc_freqs = osc_list
         self._osc_phases = np.zeros(len(osc_list))
+        if self.drone_on:
+            self._bleed_reset()        # new partials, new phases at the mic
         # Re-size sample playback heads to match voicing length.
         with self._sample_lock:
             if self._drone_sample is not None:

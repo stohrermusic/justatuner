@@ -178,6 +178,7 @@ test("input_open() is False with no stream and no synthetic source", not e.input
 print("\n--- get_pitch on the synthetic source ---")
 e = AudioEngine()
 e.synthetic_hz = 196.0
+e._start_input_stream = lambda: None   # never a real device in a test
 e.running = True                       # start() needs sounddevice; the path under test does not
 for _ in range(6):
     f, c = e.get_pitch()
@@ -198,18 +199,13 @@ e.running = False
 
 
 # ============================================
-# DRONE CANCELLATION NOTCH (2026-10-06, measured first)
+# MONITORING MODES (2026-10-07)
 # ============================================
-# _cancel_drone zeroes +-4 Hz round every partial of the drone before YIN.
-# Measured with phase-continuous signals: with headphones (no bleed) the
-# notch biases a unison by about +1 c; with speakers (the rich drone at
-# -10 dB in the mic) a just third reads -12 c and a fifth -5.5 c, and the
-# drone alone still registers as a unison (the notch cannot remove its
-# leakage). Wider or Hann-windowed notches were measured and rejected:
-# they bias the headphones unison by 30-80 c. No notch loses the third
-# under bleed entirely. The UI's "Headphones recommended" is the honest
-# answer; these gates pin the contract as measured.
-print("\n--- Drone cancellation notch ---")
+# Speakers mode (listen to the room, subtract the drone's partials) is gated
+# in tools/test_drone_cancel.py. Here: headphones mode does nothing to the
+# signal, and the sample drone keeps the old +-4 Hz spectral notch, whose
+# leakage is documented rather than gated (headphones are the answer there).
+print("\n--- Monitoring modes ---")
 
 
 def feed(e, blocks):
@@ -236,31 +232,33 @@ def drone_blocks(e, n=2):
 
 
 e = AudioEngine()
+e._start_input_stream = lambda: None   # never a real device in a test
+e.monitoring = "headphones"
 e.running = True
 e.set_drone(on=True, freq=130.81, voicing="root", dtype="rich", volume=0.3)
+test("headphones: no listen, bleed status off", e.bleed_status() == "off")
 worst = 0.0
 for off in (0.0, 2.5, 10.0, 30.0):
     feed(e, player_blocks(130.81 * 2 ** (off / 1200)))
     f, c = e.get_pitch()
     worst = max(worst, abs(cents(f, 130.81) - off))
-test(f"headphones: drone on, unison practice at 0-30 c reads within 2 c (worst bias {worst:.2f} c)", worst < 2.0)
+test(f"headphones: drone on, unison practice at 0-30 c reads within 0.3 c (worst {worst:.2f} c)", worst < 0.3)
 d = drone_blocks(e)
 feed(e, [b * 0.3 for b in d])
 f, c = e.get_pitch()
-print(f"        info: speakers, player silent: the drone itself reads {f:.1f} Hz conf {c:.2f} (notch leakage; headphones recommended)")
-errs = {}
-for name, off in (("M3", 386.31), ("P5", 701.96)):
-    feed(e, [p + b * 0.3 for p, b in zip(player_blocks(130.81 * 2 ** (off / 1200)), d)])
-    f, c = e.get_pitch()
-    errs[name] = None if f is None else cents(f, 130.81) - off
-test(f"speakers: just third and fifth over the bleeding drone read within 15 c "
-     f"(M3 {errs['M3']:+.1f} c, P5 {errs['P5']:+.1f} c)",
-     all(v is not None and abs(v) < 15.0 for v in errs.values()))
-e.set_drone(on=False)
-feed(e, player_blocks(130.81 * 2 ** (2.5 / 1200)))
-f, c = e.get_pitch()
-test(f"drone off: no notch, the same note reads {cents(f, 130.81):+.2f} c (within 0.3 of 2.5)",
-     abs(cents(f, 130.81) - 2.5) < 0.3)
+print(f"        info: headphones mode but speakers in use: the drone reads {f:.1f} Hz conf {c:.2f} (the user's choice)")
+
+# The sample drone is not a known set of partials: the notch stays for it.
+e.monitoring = "speakers"
+e._drone_sample = np.sin(2 * np.pi * 220 * np.arange(44100) / 44100).astype(np.float32)
+e._drone_sample_sr, e._drone_sample_freq, e._sample_phases = 44100, 220.0, np.zeros(1)
+e.set_drone(dtype="sample")
+test("sample drone in speakers mode: status off (notch path)", e.bleed_status() == "off")
+x = player_blocks(130.81 * 2 ** (2.5 / 1200))[0] + d[0] * 0.3
+y = e._notch_drone(x)
+fn, cn = yin_detect(y, 44100, fmin=65, fmax=2500, threshold=0.25)
+test(f"sample-drone notch: a unison +2.5 c over the bleed still reads a pitch ({cents(fn, 130.81):+.1f} c; leakage, documented)",
+     fn is not None)
 
 
 # ============================================

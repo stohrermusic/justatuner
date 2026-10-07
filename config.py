@@ -50,6 +50,9 @@ DEFAULT_SETTINGS = {
         "drone_volume": 0.3,
         "show_et_diff": True,
         "instrument": "Auto",
+        # "speakers": listen to the room when the drone starts and cancel
+        # its bleed from the mic; "headphones": no cancellation at all.
+        "monitoring": "speakers",
         "visualizer_mode": "Lissajous",
         "scope_color": "Green",
         "scope_trails": 1,
