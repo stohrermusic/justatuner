@@ -245,7 +245,11 @@ def load_settings():
             user = json.load(f)
         if not isinstance(user, dict):
             return defaults
-    except (OSError, json.JSONDecodeError):
+    except (OSError, ValueError):
+        # ValueError covers json.JSONDecodeError AND UnicodeDecodeError: a
+        # file with bytes that are not UTF-8 raised inside fp.read(), before
+        # the parser, and nothing caught it, so a damaged settings file
+        # stopped the app launching (found by tools/test_config.py, 2026-10-06).
         return defaults
 
     merged = defaults
