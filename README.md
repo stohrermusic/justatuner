@@ -29,8 +29,9 @@ A drone synthesizer with live just-intonation interval analysis. Set a root, fli
 
 - Root note selector across all 12 chromatic pitches, with a dice button for random root practice
 - DRONE switch with vintage labeled OFF / ON positions
-- Drone voicings: root, root + fifth, major triad, minor triad
-- Drone sound: pure sine, rich harmonic stack, or **WAV sample** — load a sustained-tone file from disk or record one off the mic; pitch is auto-detected via YIN, attack/release are trimmed, and an equal-power crossfade at the loop boundary makes it loop cleanly. The voicing system layers pitch-shifted copies of the sample, so one recorded "ahhh" becomes a layered choral drone in major-triad voicing
+- Drone voicings as just ratios: root, root + fifth, major and minor triads, major 7th, dominant 7th (the harmonic 7:4), minor 7th, sus4, sus2, diminished, augmented
+- **Chord progressions** (Drone > Progression…): presets (I–IV–V–I, ii–V–I, a twelve-bar blues, the cycle of fifths…) or your own, typed as `C | F | G7:2 | Am` or built with the chord pickers; bars at a tempo, seconds per chord, or manual advance on a key of your choice; count-in, current and next chord shown; saved under a name
+- Drone sound: pure sine, rich harmonic stack, or **WAV sample** — load a sustained-tone file from disk or record one off the mic; pitch is auto-detected via YIN, attack/release are trimmed, and a period-aligned crossfade at the loop boundary makes it loop cleanly. The voicing system layers pitch-shifted copies of the sample, so one recorded "ahhh" becomes a layered choral drone in major-triad voicing
 - Octave selector (2-5) for the drone fundamental
 - Interval meter with LOCKED indicator (within 5¢ of just intonation) and cents readout
 - Six visualizer modes for the round CRT (Options > Visualizer > Mode):
@@ -44,7 +45,7 @@ A drone synthesizer with live just-intonation interval analysis. Set a root, fli
 - Show ET Difference toggle — see how far each JI interval sits from equal temperament
 - Transposition support (Concert, B♭, E♭, F) so written-pitch instruments see their own note names
 - Instrument presets for pitch detection (sax family, voice, brass, strings, etc.)
-- Spectral notch filter on the mic input at every drone oscillator frequency — knocks down direct bleed so the pitch detector can lock onto you instead of the drone. It helps but it's not magic: room reflections, the drone's higher harmonics, and any speaker feedback at slightly-shifted frequencies still get through. **Headphones strongly recommended when the drone is on** — open speakers feed the drone back into the mic in ways the notch can't fully cancel.
+- Speakers or headphones (Exerciser Options > Monitoring). With speakers, the drone leaks into the mic, so whenever the drone starts or changes chord the app listens to the room for a few seconds and then cancels the drone from what the mic hears — it knows exactly what it is playing, so each partial can be subtracted at the level and phase it arrives with. A chord the app has heard once in a session needs no second listen, so a progression calibrates each chord once and then plays straight through. With headphones there is nothing to cancel; choose Headphones and there is no listen. A WAV-sample drone can't be cancelled this way (it isn't a known set of partials) — use headphones with it.
 
 ### General
 - Two tabs, one window — only the active tab uses the microphone, so the OS never sees two opens on your mic
@@ -125,6 +126,15 @@ python main.py
 
 Python 3.11+ recommended.
 
+```bash
+# Every test suite (no microphone needed; the audio tabs run on synthetic tones)
+python tools/run_tests.py
+
+# The app's own self-check, and a screenshot walk of every tab and dialog
+python main.py --selftest
+python main.py --tour all --shots some_folder
+```
+
 ## Building
 
 ```bash
@@ -135,7 +145,7 @@ python build.py
 python build.py --clean
 ```
 
-Each platform has to build its own binary — there's no cross-compilation. The GitHub Actions workflow in `.github/workflows/build.yml` does all three (Windows installer, macOS .app, Linux binary) on every push to `main` or `beta`.
+Each platform has to build its own binary — there's no cross-compilation. The GitHub Actions workflow in `.github/workflows/build.yml` lints, runs the test suites on Windows, macOS and Linux, then builds all three (Windows installer, macOS .app, Linux binary), runs each frozen binary's self-check, round-trips the Windows installer, and screenshots the running app on the Mac runner, on every push to `main` or `beta`.
 
 ## Config Location
 

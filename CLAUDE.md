@@ -196,7 +196,7 @@ installer.iss           → Inno Setup script for Windows installer
 
 **Tab-aware audio**: only the active notebook tab's engine has an open sounddevice InputStream. `main.py`'s `_on_tab_changed` stops one and starts the other. Critical because the OS sometimes refuses two concurrent opens on the same input device on macOS.
 
-**Tab-specific menus**: each tab rebuilds the menubar when it becomes active. The exerciser contributes Drone / Exerciser Options menus; the tuner contributes a **Tuner** menu whose **Settings…** entry opens `_tuner_open_settings` (stripe/faceplate color, ring + overall brightness, octave boost, input-device picker, on-screen FPS toggle). Some tuner controls are also inline (sensitivity, reference pitch, transposition, waveform). The Tuner menu's wiring was missing until v1.1.x — the dialog existed but nothing opened it (an extraction gap) — and once wired, the dialog raised ImportError until v1.1.3 because neither `config.get_input_devices` nor `ui_dialogs.add_tooltip` (both imported inside `_tuner_open_settings`) had been extracted. Any smoke test of the tuner should actually open Tuner > Settings… — the imports are lazy, so `import tuner.view` succeeding proves nothing.
+**Tab-specific menus**: each tab rebuilds the menubar when it becomes active. The exerciser contributes the Drone menu (sound, voicing, sample, the progression entries) and Exerciser Options (input device, Monitoring, visualizer); the tuner contributes a **Tuner** menu whose **Settings…** entry opens `_tuner_open_settings` (stripe/faceplate color, ring + overall brightness, octave boost, input-device picker, on-screen FPS toggle). Some tuner controls are also inline (sensitivity, reference pitch, transposition, waveform). The Tuner menu's wiring was missing until v1.1.x — the dialog existed but nothing opened it (an extraction gap) — and once wired, the dialog raised ImportError until v1.1.3 because neither `config.get_input_devices` nor `ui_dialogs.add_tooltip` (both imported inside `_tuner_open_settings`) had been extracted. Any smoke test of the tuner should actually open Tuner > Settings… — the imports are lazy, so `import tuner.view` succeeding proves nothing.
 
 **Settings persistence**: `config.load_settings()` does a two-level deep merge with `DEFAULT_SETTINGS` so old config files survive new keys being added. Save happens on app close in `JustATunerApp._on_close` via both views' `save_settings()` methods.
 
@@ -226,9 +226,9 @@ Audio stream health monitoring via `AudioRingBuffer.is_stale()` — if no new au
 
 ### Exerciser engine (`exerciser/engine.py`)
 
-Drone synthesizer + mic input + pitch detection in one class. Two independent rates: `in_sr` (mic; YIN, drone-notch, Lissajous reference sine, recording) and `sr` (drone output; oscillator phase increments, sample playback rate). Input health is checked on the `get_pitch()` timer by `_check_input_health()`: if the input callback has been silent for `INPUT_STALE_S` (1.5 s) or the stream never opened, it reopens, paced by `INPUT_RETRY_S` (3 s) so an absent mic doesn't hammer PortAudio. `input_error` (None when healthy) drives the drone tab's **MIC** status line via `ExerciserView._update_mic_status`.
+Drone synthesizer + mic input + pitch detection in one class. Two independent rates: `in_sr` (mic; YIN, drone cancellation, Lissajous reference sine, recording) and `sr` (drone output; oscillator phase increments, sample playback rate). Input health is checked on the `get_pitch()` timer by `_check_input_health()`: if the input callback has been silent for `INPUT_STALE_S` (1.5 s) or the stream never opened, it reopens, paced by `INPUT_RETRY_S` (3 s) so an absent mic doesn't hammer PortAudio. `input_error` (None when healthy) drives the drone tab's **MIC** status line via `ExerciserView._update_mic_status`.
 
-`_rebuild_oscillators` builds a per-voice list `_osc_freqs = [(freq, amp), ...]` driven by the current voicing (root / root+fifth / major / minor) and sound type:
+`_rebuild_oscillators` builds a per-voice list `_osc_freqs = [(freq, amp), ...]` driven by the current voicing (one of the eleven just-ratio chords in `VOICINGS`) and sound type:
 
 - **sine**: one oscillator per voice
 - **rich**: 8 partials per voice — the fundamental plus harmonics 2–8 at decreasing amplitude (8 / 16 / 24 oscillators for root / fifth / triad voicings)
@@ -352,7 +352,7 @@ App opens **maximized** on every platform: `state('zoomed')` on Windows, `attrib
 
 ## Tab-Specific Menu
 
-`main.py`'s `_rebuild_menubar(is_tuner)` builds a fresh menubar on every tab change. Both views expose `populate_menu(menubar)` to contribute their tab's menus — Tuner ▸ Settings… for the tuner, Drone / Exerciser Options for the exerciser.
+`main.py`'s `_rebuild_menubar(is_tuner)` builds a fresh menubar on every tab change. Both views expose `populate_menu(menubar)` to contribute their tab's menus — Tuner ▸ Settings… for the tuner; Drone (Sound, Voicing, Sample, Progression…, Start / Stop Progression, Next Chord) and Exerciser Options (Input, Monitoring, Visualizer, Show ET Difference) for the exerciser.
 
 ## Branching Strategy
 

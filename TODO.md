@@ -56,11 +56,22 @@ Audio-input robustness pass, prompted by "did we miss any of the SSC mac audio f
 
 Verified on Windows: unit-level mock of the CoreAudio refusal (fallback to 16 kHz, A4 detected on the A wheel at 0.76 ¢), bogus-device fallback on both engines, stale-callback restart, legacy-index migration, both tabs running in Tk. **Mac test checklist for next week** (friend's Apple Silicon Mac, ideally with AirPods): (1) launch, mic prompt appears, wheels move on built-in mic, MIC lamp green (if the prompt is *denied*, the lamp should go amber "no signal" within ~3 s on both tabs); (2) pair AirPods, pick them in Tuner > Settings… → wheels still move, `app.log` shows the "refused 44100 Hz … opened at N Hz" line; (3) same on the drone tab — MIC line shows the rate; (4) disconnect AirPods mid-session → drone tab MIC line goes red then recovers on the built-in mic within ~5 s; tuner shows retry or recovers; (5) quit with Cmd-Q, relaunch → device choice remembered; (6) Help > Test Audio Latency… on the built-in mic + speakers (expect well under 100 ms) and again with AirPods as input and output (expect 150 ms+ and an amber "low quality input" MIC lamp on both tabs). Matt chose to ship v1.1.3 before that test rather than hold the Windows/Linux fixes; the Mac checklist still applies to the shipped build. **If everything passes, port to SSC**: `audio_utils.py` (drop-in, identical), `tuner_engine.py` (identical to `tuner/engine.py`), `config.get_input_devices` (SSC already has it; drop the <44100 filter and add `resolve_input_device`/`remember_input_device` + the `audio_input_device_name` default), `tuner_tab.py` device handling, and consider the same rate fallback in `toner_engine.py`.
 
+### Next release — on `beta` since 2026-10-06, unreleased
+
+Ported SSC's tuner fixes and synthetic Mac testing, then went well past them. On `beta`, CI green, **not yet driven by Matt**:
+
+- **Tuner accuracy**: Hann closed-form peak estimator (two-neighbour form; in-tune A1–A6 were up to 15.3 c off, now 0.13 c pure / 0.72 c with a second harmonic at A1); numpy and sounddevice imported separately.
+- **GPU strobe**: real adapter texture limits (the 2048 px cap panicked `Surface::configure` on scaled displays), Mailbox presentation (0.16 ms/frame, was 16.67 with Fifo), panic-safe fallback to the canvas (a pyo3 panic is a `BaseException`), software adapters take the canvas path.
+- **Audio-error text survives canvas rebuilds**; Tuner Settings' device box no longer blank (collected `StringVar`); dialogs open over the app; colour swatches render on Aqua.
+- **Drone**: Speakers / Headphones monitoring with room-listening drone cancellation and a per-session room table; eleven just-ratio voicings; click-free chord changes; **chord progressions** (editor, presets, notation, bars / seconds / manual key, pre-calibration); float and int32 WAVs read correctly; seamless sample loops; A1 samples; rounded saves; a settings file with bad bytes no longer blocks launch.
+- **Testing**: twelve suites (~440 checks) in `tools/`, `--selftest`, `--tour all`, CI with lint + three-platform tests + frozen-build probes + Windows installer round trip + Mac light/dark screenshot tours; `tools/measure_bleed.py` for the real-room measurement.
+- **Pending before this ships**: Matt drives it (headphones; Scarlett 2i2 with speakers; laptop speakers + USB mic, running `measure_bleed.py` on each); the Apple Silicon test from v1.1.3 is still outstanding; version bump + `release_notes_v1.2.0.md`; user guide reviewed in Matt's voice. **Roadmap**: MIDI entry for progressions (needs a MIDI library proven in CI first); click track.
+
 ## Iterative (Garden is marked beta for a reason)
 
 ### Garden visualizer tuning
 
-Constants at the top of `_draw_garden` in `exerciser/view.py` are the obvious knobs:
+The `GARDEN_*` class attributes just above `_draw_garden` in `exerciser/view.py` are the obvious knobs:
 
 - `GARDEN_PLANT_BASE_SPEED` (0.45) — pixels/frame for a fresh main stem
 - `GARDEN_PLANT_BASE_LIFE` (400) — frames a main stem lives
