@@ -249,6 +249,37 @@ jobs:
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "/DAppVersion=$env:APP_VERSION" installer.iss
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      # The installer is what every Windows user runs, and nothing had ever
+      # run it. Install silently, launch the INSTALLED copy with --selftest,
+      # check the Start Menu shortcut, uninstall silently, and make sure the
+      # user's config folder was left alone.
+      - name: Installer round-trip (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $setup = Get-ChildItem dist\JustATuner-Windows-Setup-*.exe | Select-Object -First 1
+          $cfg = "$env:APPDATA\JustATuner"
+          New-Item -ItemType Directory -Force $cfg | Out-Null
+          Set-Content "$cfg\marker.txt" "keep me"
+          $p = Start-Process -FilePath $setup.FullName -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "installer exit $($p.ExitCode)" }
+          $exe = "${env:ProgramFiles}\JustATuner\JustATuner.exe"
+          if (-not (Test-Path $exe)) { throw "installed exe missing at $exe" }
+          $env:JUSTATUNER_CONFIG_DIR = "$env:RUNNER_TEMP\installed-selftest"
+          $r = Start-Process -FilePath $exe -ArgumentList "--selftest" -Wait -PassThru
+          Get-Content "$env:JUSTATUNER_CONFIG_DIR\app.log" -ErrorAction SilentlyContinue
+          if ($r.ExitCode -ne 0) { throw "installed copy's selftest exit $($r.ExitCode)" }
+          $lnk = "${env:ProgramData}\Microsoft\Windows\Start Menu\Programs\JustATuner\JustATuner.lnk"
+          if (-not (Test-Path $lnk)) { throw "Start Menu shortcut missing: $lnk" }
+          $unins = Get-ChildItem "${env:ProgramFiles}\JustATuner\unins*.exe" | Select-Object -First 1
+          $u = Start-Process -FilePath $unins.FullName -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART" -Wait -PassThru
+          if ($u.ExitCode -ne 0) { throw "uninstaller exit $($u.ExitCode)" }
+          $deadline = (Get-Date).AddSeconds(60)
+          while ((Test-Path $exe) -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 2 }
+          if (Test-Path $exe) { throw "exe still present 60 s after uninstall" }
+          if (-not (Test-Path "$cfg\marker.txt")) { throw "uninstall removed the user's config folder" }
+          Write-Host "install -> installed selftest -> Start Menu shortcut -> uninstall OK; config folder preserved"
+
       # ---------- Rename / package per-platform artifacts ----------
       - name: Rename Linux artifact
         if: matrix.os == 'ubuntu-latest'
