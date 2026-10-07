@@ -147,6 +147,32 @@ test(f"B5 26.3 c flat reads -26.3 c (got {r.cents_errors[11]:+.3f})",
 
 
 # ============================================
+# IMPORTS ARE SEPARATE (2026-10-06)
+# ============================================
+# One combined try used to set np = None whenever sounddevice was missing,
+# so a machine without PortAudio lost the analysis math too. Import the
+# module in a child interpreter with sounddevice blocked and check that
+# numpy is still bound and the flag is honest.
+print("\n--- numpy survives a missing sounddevice ---")
+import subprocess  # noqa: E402
+_probe = subprocess.run(
+    [sys.executable, "-c",
+     "import sys; sys.modules['sounddevice'] = None\n"
+     "sys.path.insert(0, %r)\n"
+     "import tuner.engine as e\n"
+     "print(e.np is not None, e.sd is None, e.AUDIO_AVAILABLE)\n"
+     "import numpy as np\n"
+     "r = e.TunerEngine().analyze_buffer((0.5 * np.sin(2 * np.pi * 440 * np.arange(8192) / 44100)).astype(np.float32))\n"
+     "print(r.active[9])" % os.path.dirname(os.path.dirname(os.path.abspath(__file__)))],
+    capture_output=True, text=True)
+_lines = _probe.stdout.split()
+test(f"with sounddevice blocked: np bound, sd None, AUDIO_AVAILABLE False ({_probe.stdout.strip() or _probe.stderr.strip()[-120:]})",
+     _probe.returncode == 0 and _lines[:3] == ["True", "True", "False"])
+test("with sounddevice blocked: analyze_buffer still lights the A wheel",
+     _probe.returncode == 0 and len(_lines) > 3 and _lines[3] == "True")
+
+
+# ============================================
 # RESULT STRUCTURE / BASICS
 # ============================================
 print("\n--- Basics ---")

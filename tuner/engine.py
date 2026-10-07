@@ -14,14 +14,20 @@ import logging
 import math
 import time
 
+# numpy and sounddevice are imported separately: the analysis math needs
+# only numpy, and a machine with numpy but no working sounddevice (no
+# PortAudio library) must keep `np` usable. One combined try used to set
+# np = None whenever sounddevice was missing, which took every pure-math
+# path (analyze_buffer, the tests) down with it (2026-10-06, from SSC).
 try:
     import numpy as np
-    import sounddevice as sd
-    AUDIO_AVAILABLE = True
-except (ImportError, OSError):
-    AUDIO_AVAILABLE = False
+except ImportError:
     np = None
+try:
+    import sounddevice as sd
+except (ImportError, OSError):
     sd = None
+AUDIO_AVAILABLE = np is not None and sd is not None
 
 from audio_utils import (  # noqa: E402 — shared with exerciser/engine.py
     AudioRingBuffer, hann_peak_freq, open_input_stream, open_output_stream)
