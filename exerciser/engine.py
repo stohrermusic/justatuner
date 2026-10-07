@@ -54,6 +54,37 @@ BLEED_PAUSE_S = 1.0
 MONITORING_SPEAKERS = "speakers"
 MONITORING_HEADPHONES = "headphones"
 
+# Chord voicings as just ratios above the root, with the amplitude of each
+# voice. The first four are the original drone voicings; the rest arrived
+# with progressions (2026-10-07). dom7 is the harmonic seventh 7:4, min7 the
+# just minor seventh 9:5, dim uses the septimal tritone 7:5, aug 25:16.
+VOICINGS = {
+    "root":  [(1, 1.0)],
+    "fifth": [(1, 1.0), (3 / 2, 0.7)],
+    "major": [(1, 1.0), (5 / 4, 0.6), (3 / 2, 0.7)],
+    "minor": [(1, 1.0), (6 / 5, 0.6), (3 / 2, 0.7)],
+    "maj7":  [(1, 1.0), (5 / 4, 0.6), (3 / 2, 0.7), (15 / 8, 0.5)],
+    "dom7":  [(1, 1.0), (5 / 4, 0.6), (3 / 2, 0.7), (7 / 4, 0.5)],
+    "min7":  [(1, 1.0), (6 / 5, 0.6), (3 / 2, 0.7), (9 / 5, 0.5)],
+    "sus4":  [(1, 1.0), (4 / 3, 0.6), (3 / 2, 0.7)],
+    "sus2":  [(1, 1.0), (9 / 8, 0.6), (3 / 2, 0.7)],
+    "dim":   [(1, 1.0), (6 / 5, 0.6), (7 / 5, 0.6)],
+    "aug":   [(1, 1.0), (5 / 4, 0.6), (25 / 16, 0.6)],
+}
+VOICING_LABELS = {
+    "root": "Root", "fifth": "Root + Fifth", "major": "Major Triad", "minor": "Minor Triad",
+    "maj7": "Major 7th", "dom7": "Dominant 7th (7:4)", "min7": "Minor 7th", "sus4": "Sus4",
+    "sus2": "Sus2", "dim": "Diminished", "aug": "Augmented",
+}
+# Short chord symbols for the progression notation ("C", "Fm", "G7", ...).
+VOICING_SYMBOLS = {
+    "root": "1", "fifth": "5", "major": "", "minor": "m", "maj7": "maj7", "dom7": "7",
+    "min7": "m7", "sus4": "sus4", "sus2": "sus2", "dim": "dim", "aug": "aug",
+}
+# Crossfade from the old chord to the new one over this much of the first
+# output block, so a change doesn't click (the phases restart at zero).
+CHORD_XFADE_FRAMES = 1024
+
 # Instrument presets: (fmin, fmax, yin_threshold, confidence_threshold, description)
 INSTRUMENT_PRESETS = {
     "Auto":            (65,  2500, 0.25, 0.20, "Automatic detection"),
@@ -127,6 +158,16 @@ class AudioEngine:
         self._bleed_slope = None      # phase drift per partial, rad/s
         self._bleed_tref = 0.0
         self._bleed_last_pitch_t = 0.0
+        self._bleed_freqs = None      # partials the current gains belong to
+        self._bleed_epoch = None      # output epoch those gains were fitted against
+        # The room: per partial frequency heard this session, its amplitude
+        # and phase relative to the output's own phase, so a chord heard once
+        # needs no second listen (the progression pre-calibrates every chord
+        # once). Cleared whenever a stream reopens: the two streams' clocks
+        # then start at a new unknown offset. _room_ppm is the mic-vs-speaker
+        # clock difference, one number for the session.
+        self._room = {}               # round(f, 3) -> (amp, psi, t_cal)
+        self._room_ppm = 0.0
         self.buffer_lock = threading.Lock()
         self.buffer_ready = False
         self.pitch_history = []
@@ -147,9 +188,16 @@ class AudioEngine:
         self.drone_type = "rich"      # sine, rich, sample
         self.drone_volume = 0.3
 
-        # Oscillator internals
+        # Oscillator internals. _osc_freqs is the canonical voicing list
+        # (read by the sample path, the cancellation and the UI); the synth
+        # path renders from _synth, a dict the output callback swaps in
+        # from _synth_pending at a block boundary, recording the output
+        # sample index ("epoch") at which its phases started from zero.
         self._osc_freqs = []          # [(freq, amplitude), ...]
-        self._osc_phases = None       # numpy array of phases
+        self._osc_phases = None       # kept for compatibility; _synth holds the live phases
+        self._synth = None            # {"freqs", "amps", "phases", "epoch"}
+        self._synth_pending = None
+        self._out_total = 0           # output samples rendered: the epoch time base
         self._target_amp = 0.0        # for fade in/out
         self._current_amp = 0.0
         self._amp_slew = 0.005        # amplitude change per sample
@@ -204,6 +252,7 @@ class AudioEngine:
 
     def _start_input_stream(self):
         """Start (or restart) the input stream."""
+        self._room = {}               # new stream, new clock offset: the room is unknown again
         if self.synthetic_hz:
             self._input_stream = None
             self.input_error = None
@@ -298,6 +347,8 @@ class AudioEngine:
         switch or app close still completes. Mirrors TunerEngine.stop().
         """
         self.running = False
+        self._room = {}
+        self._bleed_state = "idle"
         if self._input_stream is not None:
             try:
                 self._input_stream.stop()
@@ -435,14 +486,57 @@ class AudioEngine:
             return "off"
         return "ready" if self._bleed_state == "ready" else "listening"
 
+    def room_known(self, freqs=None):
+        """True when every partial of the given (default: current) voicing
+        has been heard this session, so switching to it needs no listen."""
+        if freqs is None:
+            freqs = [f for f, _ in self._osc_freqs]
+        return bool(freqs) and all(round(f, 3) in self._room for f in freqs)
+
     def _bleed_reset(self):
-        """Start a fresh listen: the drone just started or changed note, so
-        every partial's phase at the mic is new."""
+        """The drone just started or changed chord: the partials' phases at
+        the mic are new. Bank what the last chord taught us about the room,
+        then settle; _cancel_drone decides whether a listen is needed."""
+        if self._bleed_state == "ready" and self._bleed_gain is not None:
+            self._room_store()
         self._bleed_state = "settle"
         self._bleed_t0 = self._in_total / float(self.in_sr)
         self._bleed_obs = []
         self._bleed_gain = None
         self._bleed_slope = None
+        self._bleed_freqs = None
+        self._bleed_epoch = None
+
+    def _room_store(self):
+        """Bank the current gains as room entries: amplitude and the phase
+        relative to the output's own phase (psi), per partial frequency."""
+        if self._bleed_freqs is None or self._bleed_epoch is None:
+            return
+        # The projection demodulates against exp(-i 2 pi f t), so for a
+        # steady chord its phase is constant in time: what the epoch
+        # contributes is -2 pi f epoch / sr (the chord's phases restarted at
+        # zero there), and what remains is the room. Store the room part.
+        for k, f in enumerate(self._bleed_freqs):
+            g = self._bleed_gain[k]
+            psi = np.angle(g) + 2 * np.pi * f * self._bleed_epoch / float(self.sr)
+            self._room[round(f, 3)] = (float(abs(g)), float(psi), float(self._bleed_tref))
+
+    def _room_derive(self, freqs, epoch, t_mid):
+        """Gains for a chord whose partials are all in the room, at this
+        output epoch and input time, without listening."""
+        k = len(freqs)
+        gain = np.zeros(k, dtype=complex)
+        slope = np.zeros(k)
+        for i, f in enumerate(freqs):
+            amp, psi, t_cal = self._room[round(f, 3)]
+            slope[i] = 2 * np.pi * f * self._room_ppm * 1e-6
+            phase = psi - 2 * np.pi * f * epoch / float(self.sr) + slope[i] * (t_mid - t_cal)
+            gain[i] = amp * np.exp(1j * phase)
+        self._bleed_gain = gain
+        self._bleed_slope = slope
+        self._bleed_tref = t_mid
+        self._bleed_freqs = list(freqs)
+        self._bleed_epoch = epoch
 
     def _bleed_project(self, buf, t_start, freqs):
         """Complex amplitude of each partial in buf (Hann-windowed), and the
@@ -470,20 +564,33 @@ class AudioEngine:
 
         freqs = [f for f, _ in self._osc_freqs]
         t_mid = t_start + 0.5 * len(buf) / float(self.in_sr)
+        syn = self._synth
+        if syn is None or syn["epoch"] is None or len(syn["freqs"]) != len(freqs) \
+                or not np.allclose(syn["freqs"], freqs):
+            return None                # the new chord hasn't reached the output yet
+        epoch = syn["epoch"]
         c, refs = self._bleed_project(buf, t_start, freqs)
 
         if self._bleed_state == "idle":
             self._bleed_reset()
         if self._bleed_state == "settle":
             if t_mid - self._bleed_t0 < BLEED_SETTLE_S:
-                return None
-            self._bleed_state = "listen"
-            self._bleed_t0 = t_mid
+                return None            # the old chord's tail is still arriving
+            if self.room_known(freqs):
+                self._room_derive(freqs, epoch, t_mid)
+                self._bleed_state = "ready"
+            else:
+                self._bleed_state = "listen"
+                self._bleed_t0 = t_mid
         if self._bleed_state == "listen":
             self._bleed_obs.append((t_mid, c))
             if t_mid - self._bleed_t0 < BLEED_LISTEN_S:
                 return None
             self._bleed_fit()
+            self._bleed_freqs = list(freqs)
+            self._bleed_epoch = epoch
+            self._room_learn_ppm()
+            self._room_store()
             self._bleed_state = "ready"
 
         # Predicted bleed at this buffer's time, then subtract it.
@@ -518,6 +625,21 @@ class AudioEngine:
             gain[i] = float(np.mean(np.abs(cs[:, i]))) * np.exp(1j * b)
         self._bleed_gain = gain
         self._bleed_slope = slope
+
+    def _room_learn_ppm(self):
+        """One clock-difference number for the session from the partials'
+        fitted drift rates (slope = 2 pi f ppm 1e-6), weighted toward the
+        loud ones; then every partial drifts by the same rule."""
+        if self._bleed_gain is None or self._bleed_freqs is None:
+            return
+        amps = np.abs(self._bleed_gain)
+        strong = amps >= 0.1 * (amps.max() if amps.size else 0)
+        if not strong.any() or amps.max() <= 0:
+            return
+        est = [self._bleed_slope[i] / (2 * np.pi * f * 1e-6)
+               for i, f in enumerate(self._bleed_freqs) if strong[i]]
+        self._room_ppm = float(np.median(est))
+        self._bleed_slope = np.array([2 * np.pi * f * self._room_ppm * 1e-6 for f in self._bleed_freqs])
 
     def _notch_drone(self, buf):
         """Remove drone frequencies with a +-4 Hz spectral notch (sample
@@ -572,16 +694,9 @@ class AudioEngine:
         # ---- Synthesize the per-voice signal ----
         if self.drone_type == "sample" and self._drone_sample is not None:
             signal = self._render_sample_voices(frames)
+            self._out_total += frames
         else:
-            freqs = np.array([f for f, _ in self._osc_freqs])
-            amps = np.array([a for _, a in self._osc_freqs])
-            phase_incs = 2.0 * np.pi * freqs / self.sr
-            t = np.arange(frames).reshape(-1, 1)
-            phases = self._osc_phases + phase_incs * t
-            signal = np.sum(amps * np.sin(phases), axis=1)
-            self._osc_phases = (self._osc_phases + phase_incs * frames) % (2 * np.pi)
-            peak = max(np.sum(amps), 0.01)
-            signal = signal / peak
+            signal = self._render_synth_block(frames)
 
         # ---- Amp envelope (slew for fade in/out) ----
         envelope = np.empty(frames)
@@ -598,6 +713,42 @@ class AudioEngine:
 
         signal *= envelope
         outdata[:, 0] = np.clip(signal, -1.0, 1.0).astype(np.float32)
+
+    @staticmethod
+    def _render_synth(voices, frames, sr):
+        """One block of the voices' sines, advancing their phases."""
+        freqs, amps, phases = voices["freqs"], voices["amps"], voices["phases"]
+        if len(freqs) == 0:
+            return np.zeros(frames)
+        incs = 2.0 * np.pi * freqs / sr
+        t = np.arange(frames).reshape(-1, 1)
+        signal = np.sum(amps * np.sin(phases + incs * t), axis=1)
+        voices["phases"] = (phases + incs * frames) % (2 * np.pi)
+        return signal / max(float(np.sum(amps)), 0.01)
+
+    def _render_synth_block(self, frames):
+        """Render the synth drone; swap in a pending chord at this block
+        boundary, record its epoch, and crossfade from the old one so the
+        change doesn't click (phases restart at zero)."""
+        pending = self._synth_pending
+        if pending is not None:
+            self._synth_pending = None
+            pending["epoch"] = self._out_total
+            old = self._synth
+            self._synth = pending
+            signal = self._render_synth(pending, frames, self.sr)
+            if old is not None and len(old["freqs"]):
+                n = min(frames, CHORD_XFADE_FRAMES)
+                old_sig = self._render_synth(old, frames, self.sr)
+                ramp = np.ones(frames)
+                ramp[:n] = np.linspace(0.0, 1.0, n)
+                signal = old_sig * (1.0 - ramp) + signal * ramp
+        elif self._synth is not None:
+            signal = self._render_synth(self._synth, frames, self.sr)
+        else:
+            signal = np.zeros(frames)
+        self._out_total += frames
+        return signal
 
     def _render_sample_voices(self, frames):
         """Resample-and-loop the loaded WAV sample for every voice in
@@ -848,16 +999,7 @@ class AudioEngine:
     def _rebuild_oscillators(self):
         """Recalculate oscillator bank for current drone settings."""
         f = self.drone_freq
-        voices = [(f, 1.0)]
-
-        if self.drone_voicing == "fifth":
-            voices.append((f * 3 / 2, 0.7))
-        elif self.drone_voicing == "major":
-            voices.append((f * 5 / 4, 0.6))
-            voices.append((f * 3 / 2, 0.7))
-        elif self.drone_voicing == "minor":
-            voices.append((f * 6 / 5, 0.6))
-            voices.append((f * 3 / 2, 0.7))
+        voices = [(f * ratio, amp) for ratio, amp in VOICINGS.get(self.drone_voicing, VOICINGS["root"])]
 
         osc_list = []
         if self.drone_type == "sample":
@@ -876,6 +1018,12 @@ class AudioEngine:
 
         self._osc_freqs = osc_list
         self._osc_phases = np.zeros(len(osc_list))
+        self._synth_pending = {
+            "freqs": np.array([f for f, _ in osc_list], dtype=float),
+            "amps": np.array([a for _, a in osc_list], dtype=float),
+            "phases": np.zeros(len(osc_list)),
+            "epoch": None,
+        }
         if self.drone_on:
             self._bleed_reset()        # new partials, new phases at the mic
         # Re-size sample playback heads to match voicing length.

@@ -211,6 +211,57 @@ test(f"speakers mode on headphones: unison +2.5 c reads {cents(np.median(r), 130
      bool(r) and abs(cents(np.median(r), 130.81) - 2.5) < 0.3)
 
 # ============================================
+print("\n--- The room table: a chord heard once needs no second listen ---")
+e = fresh()
+room = Room(e, ppm=20.0)
+run(e, room, LISTEN_TOTAL)
+test("C rich calibrated; its partials are in the room", e.room_known())
+e.set_drone(freq=146.83)                        # D: new partials
+test("D: not in the room yet", not e.room_known())
+run(e, room, LISTEN_TOTAL)
+test("D calibrated after its listen", e.bleed_status() == "ready" and e.room_known())
+e.set_drone(freq=130.81)                        # back to C
+test("back to C: known, so only the settle, no listen", e.room_known())
+r = run(e, room, BLEED_SETTLE_S + 0.3)
+test(f"back to C: cancelling within {BLEED_SETTLE_S + 0.3:.1f} s, not {BLEED_SETTLE_S + BLEED_LISTEN_S:.1f}",
+     e.bleed_status() == "ready")
+r = run(e, room, 4.0)
+test(f"back to C from the room: drone alone reads no pitch ({sum(x is not None for x in r)} readings)",
+     all(x is None for x in r))
+buf = np.roll(e._ring_buf, -e._ring_pos).copy()
+t0 = (e._in_total - e._ring_size) / SR
+c_raw, _ = e._bleed_project(buf, t0, [130.81])
+dt = t0 + 0.5 * len(buf) / SR - e._bleed_tref
+pred = e._bleed_gain[0] * np.exp(1j * e._bleed_slope[0] * dt)
+residual_db = 20 * math.log10(abs(c_raw[0] - pred) / (abs(c_raw[0]) + 1e-12) + 1e-12)
+test(f"back to C from the room (20 ppm drift, no new listen): fundamental removed by {-residual_db:.1f} dB (gate 20)",
+     residual_db < -20)
+f = 130.81 * 5 / 4
+r = [x for x in run(e, room, 2.0, player_hz=f) if x is not None]
+test(f"back to C from the room: just third reads within 2 c ({cents(np.median(r), f):+.2f} c)",
+     bool(r) and abs(cents(np.median(r), f)) < 2.0)
+print(f"        info: session clock difference learned {e._room_ppm:+.1f} ppm (true 20.0)")
+test("learned clock difference within 3 ppm of the truth", abs(e._room_ppm - 20.0) < 3.0)
+e.set_drone(voicing="major")                    # C major: 5/4 and 3/2 partials are new
+test("C major: the new partials are unknown, the root's are known", not e.room_known())
+
+# A chord change must not click: the first output block crossfades.
+e = fresh()
+out = np.zeros((OUTPUT_BLOCK, 1), dtype=np.float32)
+for _ in range(30):
+    e._output_callback(out, OUTPUT_BLOCK, None, None)
+prev = out[:, 0].astype(np.float64).copy()
+e.set_drone(freq=196.0, voicing="major")
+e._output_callback(out, OUTPUT_BLOCK, None, None)
+joined = np.concatenate([prev, out[:, 0].astype(np.float64)])
+step = np.abs(np.diff(joined))
+seam = step[OUTPUT_BLOCK - 1]
+typical = float(np.percentile(step[:OUTPUT_BLOCK - 1], 99))
+test(f"chord change: the output seam is {seam:.4f}, a normal step is {typical:.4f} (no click)", seam <= 1.5 * typical)
+test("the new chord's epoch is the output sample index of that block",
+     e._synth["epoch"] == 30 * OUTPUT_BLOCK and e._synth_pending is None)
+
+# ============================================
 print("\n--- Note change and sample drone ---")
 e = fresh()
 room = Room(e)

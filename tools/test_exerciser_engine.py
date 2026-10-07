@@ -160,6 +160,20 @@ test("sine major: three voices at 1, 5/4, 3/2 of the root",
      [round(f / e.drone_freq, 4) for f, _ in e._osc_freqs] == [1.0, 1.25, 1.5])
 e.set_drone(voicing="minor")
 test("sine minor: 6/5 third", abs(e._osc_freqs[1][0] / e.drone_freq - 1.2) < 1e-9)
+from exerciser.engine import VOICINGS, VOICING_LABELS, VOICING_SYMBOLS  # noqa: E402
+ok = True
+for name, ratios in VOICINGS.items():
+    e.set_drone(voicing=name, dtype="sine")
+    got = [round(f / e.drone_freq, 6) for f, _ in e._osc_freqs]
+    want = [round(r, 6) for r, _ in ratios]
+    if got != want or ratios[0][0] != 1 or any(not (1 <= r < 2) for r, _ in ratios):
+        ok = False
+        print(f"        {name}: {got} vs {want}")
+test(f"every voicing is its just ratios within the octave, root first ({len(VOICINGS)} voicings)", ok)
+test("every voicing has a menu label and a chord symbol",
+     set(VOICINGS) == set(VOICING_LABELS) == set(VOICING_SYMBOLS))
+test("dom7 carries the harmonic seventh 7:4, min7 the just minor seventh 9:5",
+     VOICINGS["dom7"][3][0] == 7 / 4 and VOICINGS["min7"][3][0] == 9 / 5)
 e.set_drone(on=True, volume=0.5)
 test("set_drone(on) targets the volume; off targets 0",
      e._target_amp == 0.5 and (e.set_drone(on=False) or e._target_amp == 0.0))
