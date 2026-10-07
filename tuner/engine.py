@@ -23,8 +23,8 @@ except (ImportError, OSError):
     np = None
     sd = None
 
-from audio_utils import (  # noqa: E402 — shared with toner_engine
-    AudioRingBuffer, open_input_stream, open_output_stream)
+from audio_utils import (  # noqa: E402 — shared with exerciser/engine.py
+    AudioRingBuffer, hann_peak_freq, open_input_stream, open_output_stream)
 
 _log = logging.getLogger(__name__)
 
@@ -276,7 +276,7 @@ class TunerEngine:
 
         For each pitch class:
         - Sums FFT magnitude across all octaves → magnitudes[pc]
-        - Finds dominant frequency via parabolic interpolation
+        - Finds dominant frequency via the Hann closed-form peak estimator
         - Computes cents error from reference → drives phase accumulation
         - Phase offset drives the stroboscopic rotation of that wheel
         """
@@ -389,19 +389,11 @@ class TunerEngine:
                         best_octave = oct_idx
 
                     # Per-ring phase tracking — each ring independently
-                    # measures its own octave's frequency via parabolic
-                    # interpolation — each ring responds to its own
+                    # measures its own octave's frequency (Hann closed-form
+                    # peak estimator) — each ring responds to its own
                     # frequency component independently.
                     if peak_bin > 0 and peak_bin < len(mags) - 1:
-                        alpha = float(mags[peak_bin - 1])
-                        beta = float(mags[peak_bin])
-                        gamma = float(mags[peak_bin + 1])
-                        denom = alpha - 2 * beta + gamma
-                        if abs(denom) > 1e-10 and beta > 0:
-                            p = 0.5 * (alpha - gamma) / denom
-                            ring_freq = (peak_bin + p) * bin_freq
-                        else:
-                            ring_freq = peak_bin * bin_freq
+                        ring_freq = hann_peak_freq(mags, peak_bin, bin_freq)
 
                         if ring_freq > 0 and freq > 0:
                             ring_cents = 1200.0 * math.log2(ring_freq / freq)
@@ -425,15 +417,7 @@ class TunerEngine:
                     po = int(np.argmax(local_mags)) - 1
                     pb = best_bin_idx + po
                     if 0 < pb < len(mags) - 1:
-                        a2 = float(mags[pb - 1])
-                        b2 = float(mags[pb])
-                        g2 = float(mags[pb + 1])
-                        d2 = a2 - 2 * b2 + g2
-                        if abs(d2) > 1e-10 and b2 > 0:
-                            p2 = 0.5 * (a2 - g2) / d2
-                            af = (pb + p2) * bin_freq
-                        else:
-                            af = pb * bin_freq
+                        af = hann_peak_freq(mags, pb, bin_freq)
                         if af > 0 and best_freq > 0:
                             cents = 1200.0 * math.log2(af / best_freq)
                             cents = max(-CENTS_CLAMP, min(CENTS_CLAMP, cents))
