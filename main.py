@@ -41,7 +41,13 @@ class JustATunerApp:
     """Top-level Tk app. Owns the notebook, the two views, and the
     settings dict that gets persisted on close."""
 
-    def __init__(self):
+    def __init__(self, autostart=True):
+        """Build the window and both tabs.
+
+        autostart=False builds everything but starts no engine: the tests
+        and --selftest use it to set a synthetic tone on the tuner engine
+        before the first start. Normal launch starts the saved tab.
+        """
         self.settings = load_settings()
 
         self.root = tk.Tk()
@@ -85,19 +91,23 @@ class JustATunerApp:
         self._menubar = tk.Menu(self.root)
         self.root.config(menu=self._menubar)
 
-        self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
-
-        # Pick the tab the user last had open
+        # Pick the tab the user last had open. ttk QUEUES a
+        # <<NotebookTabChanged>> for this select (and for the first add),
+        # delivered on the next event-loop pass, so binding after the
+        # select does not keep the handler from running then. Instead the
+        # handler ignores an event for the tab that is already active:
+        # the explicit call below (or the caller, with autostart=False)
+        # owns the first start, exactly once.
         initial = self.settings.get("active_tab", "tuner")
         if initial == "exerciser":
             self.notebook.select(self.exerciser_frame)
         else:
             self.notebook.select(self.tuner_frame)
+        self._active_tab_id = self.notebook.select()
+        self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
 
-        # The tab-changed event won't have fired for the *initial*
-        # selection on every platform, so trigger our handler manually
-        # to start the right engine and populate the menus.
-        self._on_tab_changed()
+        if autostart:
+            self._on_tab_changed()
 
     def run(self):
         self.root.mainloop()
@@ -131,6 +141,12 @@ class JustATunerApp:
 
     def _on_tab_changed(self, event=None):
         current = self.notebook.select()
+        if event is not None and current == self._active_tab_id:
+            # The queued event for a tab that is already running (the
+            # initial selection): starting it again would open the mic
+            # twice, and would start an engine the caller asked us not to.
+            return
+        self._active_tab_id = current
         is_tuner = current == str(self.tuner_frame)
 
         # Stop the inactive engine first to release the mic, THEN start

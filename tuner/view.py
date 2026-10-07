@@ -11,9 +11,12 @@ import tkinter as tk
 from tkinter import ttk, colorchooser
 import math
 import functools
+import logging
 import sys
 
 from status_lamp import StatusLamp
+
+_log = logging.getLogger(__name__)
 
 IS_MACOS = sys.platform == 'darwin'
 
@@ -43,6 +46,17 @@ else:
         _HAS_GPU_RENDERER = True
     except ImportError:
         _HAS_GPU_RENDERER = False
+
+
+# Consecutive GPU render() failures tolerated before the tab drops to the
+# canvas: about half a second at 60 fps.
+GPU_RENDER_FAIL_LIMIT = 30
+
+
+def _last_line(exc):
+    """Last line of an exception's text — a pyo3 PanicException is several."""
+    text = str(exc).strip()
+    return text.splitlines()[-1].strip() if text else type(exc).__name__
 
 
 # ============================================
@@ -462,6 +476,7 @@ class TunerView:
         self._tuner_use_gpu = False     # Set True if GPU renderer initializes
         self._gpu_renderer = None       # tuner_render.TunerRenderer instance
         self._tuner_gpu_labels = {}     # pc_index → tk.Label (GPU mode only)
+        self._tuner_gpu_fail_count = 0  # Consecutive render() failures
 
     def create_tuner_tab(self, parent):
         """Build the Tuner tab UI."""
@@ -897,30 +912,50 @@ class TunerView:
 
         bg = self._tuner_faceplate_color
 
-        # Initialize or resize the GPU renderer
+        # Initialize or resize the GPU renderer. A wgpu panic arrives as
+        # pyo3's PanicException, a BaseException — "except Exception" lets
+        # it through into Tk's callback. Catch BaseException at every call
+        # that can touch the surface, and never retry the GPU on this frame.
         if self._gpu_renderer is None:
             frame.update_idletasks()  # ensure native window exists
+            if not frame.winfo_viewable():
+                # A Configure can arrive before the toplevel is shown (the
+                # tour's un-maximize + geometry, 2026-10-06): a swapchain on
+                # a window that is not yet visible fails Surface::configure
+                # with "Invalid surface". Leave the wheels unbuilt; the
+                # animate loop builds them once the frame is on screen.
+                return
             try:
                 hwnd = frame.winfo_id()
                 self._gpu_renderer = tuner_render.TunerRenderer(hwnd, w, h)
                 self._gpu_renderer.set_stripe_color(self._tuner_color)
                 self._gpu_renderer.set_faceplate_color(bg)
-            except (Exception, BaseException) as e:
-                print(f"GPU renderer init failed, falling back to canvas: {e}")
-                self._tuner_use_gpu = False
-                self._gpu_renderer = None
-                # Create canvas and rebuild with canvas path
-                self._tuner_canvas = tk.Canvas(
-                    self._tuner_main_frame, bg=bg,
-                    highlightthickness=0, borderwidth=0)
-                self._tuner_canvas._dark_canvas = True
-                self._tuner_canvas.pack(fill="both", expand=True, padx=5, pady=(5, 0))
-                self._tuner_canvas.bind("<Configure>", self._tuner_on_canvas_resize)
-                self._tuner_build_wheels_canvas()
+            except (KeyboardInterrupt, SystemExit):
+                raise
+            except BaseException as e:
+                self._tuner_gpu_fallback(f"init failed: {_last_line(e)}")
                 return
+            info = self._tuner_gpu_adapter_info()
+            if info is not None:
+                # WARNING so it reaches app.log (the root logger records
+                # nothing lower): this is the line a field report needs.
+                _log.warning("Tuner GPU renderer: %s via %s (%s), present mode %s",
+                             info[0], info[1], info[2], self._tuner_gpu_present_mode())
+                if info[2] == "Cpu":
+                    # A software rasterizer (Basic Render Driver, llvmpipe)
+                    # counts as no GPU: slower than the canvas and silent.
+                    self._gpu_renderer = None
+                    self._tuner_gpu_fallback(f"software rasterizer only ({info[0]})")
+                    return
         else:
-            self._gpu_renderer.resize(w, h)
-            self._gpu_renderer.set_faceplate_color(bg)
+            try:
+                self._gpu_renderer.resize(w, h)
+                self._gpu_renderer.set_faceplate_color(bg)
+            except (KeyboardInterrupt, SystemExit):
+                raise
+            except BaseException as e:
+                self._tuner_gpu_fallback(f"resize to {w}x{h} failed: {_last_line(e)}")
+                return
 
         # Set wheel layout (list of tuples for the Rust side)
         positions = [(cx, cy, radius, is_up) for (_, cx, cy, radius, is_up) in layout]
@@ -953,6 +988,80 @@ class TunerView:
 
         self._tuner_update_labels()
         self._tuner_wheels_built = True
+
+    def _tuner_gpu_adapter_info(self):
+        """(name, backend, device_type) of the GPU adapter, or None."""
+        getter = getattr(self._gpu_renderer, 'adapter_info', None)
+        if getter is None:
+            return None
+        try:
+            return tuple(getter())
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException:
+            return None
+
+    def _tuner_gpu_present_mode(self):
+        getter = getattr(self._gpu_renderer, 'present_mode', None)
+        try:
+            return getter() if getter else "?"
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException:
+            return "?"
+
+    def _tuner_gpu_render_failed(self, exc):
+        """One failed render() is a dropped frame; a run of them is a dead
+        GPU path. Returns True once the tab has switched to the canvas."""
+        self._tuner_gpu_fail_count += 1
+        if self._tuner_gpu_fail_count == 1:
+            _log.warning("Tuner GPU render failed: %s", _last_line(exc))
+        if self._tuner_gpu_fail_count >= GPU_RENDER_FAIL_LIMIT:
+            self._tuner_gpu_fallback(
+                f"{self._tuner_gpu_fail_count} consecutive render failures; "
+                f"last: {_last_line(exc)}")
+            return True
+        return False
+
+    def _tuner_gpu_fallback(self, reason):
+        """Leave GPU mode for good and put the canvas renderer in its place.
+
+        One path for every way the GPU can fail: init, a resize that
+        raised, repeated render failures, a software-only adapter. A failed
+        Surface::configure leaves the surface dead, so there is no retrying
+        the GPU on the same frame — from here on this tab is a canvas tab
+        until the app restarts. Logged with the reason, and the CPU-mode
+        notice says the renderer was unavailable rather than uninstalled.
+        """
+        _log.warning("Tuner GPU renderer unavailable, falling back to canvas: %s", reason)
+        self._tuner_use_gpu = False
+        self._gpu_renderer = None
+        self._tuner_gpu_fail_count = 0
+        for lbl in self._tuner_gpu_labels.values():
+            lbl.destroy()
+        self._tuner_gpu_labels = {}
+
+        bg = self._tuner_faceplate_color
+        gpu_frame = getattr(self, '_tuner_gpu_frame', None)
+        self._tuner_canvas = tk.Canvas(
+            self._tuner_main_frame, bg=bg,
+            highlightthickness=0, borderwidth=0)
+        self._tuner_canvas._dark_canvas = True
+        pack_kw = dict(fill="both", expand=True, padx=5, pady=(5, 0))
+        if gpu_frame is not None and gpu_frame.winfo_manager():
+            # Take the GPU frame's slot so the canvas sits above the controls.
+            self._tuner_canvas.pack(before=gpu_frame, **pack_kw)
+            gpu_frame.pack_forget()
+        else:
+            self._tuner_canvas.pack(**pack_kw)
+        self._tuner_canvas.bind("<Configure>", self._tuner_on_canvas_resize)
+        if not IS_MACOS and not hasattr(self, '_cpu_mode_lbl'):
+            self._cpu_mode_lbl = tk.Label(
+                self._tuner_main_frame,
+                text=_("CPU mode (low FPS) — GPU renderer unavailable; see Help > Open Log File"),
+                bg=bg, fg="#555555", font=("Helvetica", 8))
+            self._cpu_mode_lbl.place(relx=0.5, y=6, anchor="n")
+        self._tuner_build_wheels_canvas()
 
     def _tuner_build_wheels_canvas(self):
         """Canvas path: create StrobeWheel objects (original approach)."""
@@ -1493,6 +1602,11 @@ class TunerView:
             self._tuner_show_stream_error(self._tuner_engine.last_error)
             return
 
+        if not self._tuner_wheels_built:
+            # The GPU path declines to build on a frame that is not yet on
+            # screen; retry each frame until it is.
+            self._tuner_build_wheels()
+
         if self._tuner_engine and self._tuner_engine.is_running:
             import time as _time
             _t0 = _time.perf_counter()
@@ -1544,8 +1658,13 @@ class TunerView:
                         oct_pct,
                         float(self._tuner_overall_brightness),
                     )
-                except Exception:
-                    pass  # frame drop, not fatal
+                    self._tuner_gpu_fail_count = 0
+                except (KeyboardInterrupt, SystemExit):
+                    raise
+                except BaseException as e:
+                    # A Rust panic is a BaseException; one is a dropped frame,
+                    # a run of them switches this tab to the canvas.
+                    self._tuner_gpu_render_failed(e)
 
                 # Update label brightness based on magnitude
                 for pc_idx, lbl in self._tuner_gpu_labels.items():

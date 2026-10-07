@@ -174,7 +174,17 @@ def remember_input_device(settings, index):
 
 
 def get_config_dir():
-    """Platform-appropriate per-user config directory."""
+    """Platform-appropriate per-user config directory.
+
+    JUSTATUNER_CONFIG_DIR overrides all of the below. It exists for tests
+    and CI: a suite can point the app at a temp profile without touching
+    the user's real settings. Must be set before config is imported, since
+    the file paths are module constants.
+    """
+    override = os.environ.get("JUSTATUNER_CONFIG_DIR")
+    if override:
+        os.makedirs(override, exist_ok=True)
+        return override
     if sys.platform == "win32":
         base = os.environ.get("APPDATA") or os.path.expanduser("~")
         path = os.path.join(base, APP_NAME)
