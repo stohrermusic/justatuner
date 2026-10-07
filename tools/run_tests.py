@@ -62,7 +62,9 @@ def main(argv):
             continue
         t0 = time.time()
         try:
-            r = subprocess.run([sys.executable, os.path.join(TOOLS, fname)], cwd=ROOT, env=env,
+            # -u: unbuffered, so a suite killed by the timeout still leaves
+            # its output (block-buffered stdout into a pipe left nothing).
+            r = subprocess.run([sys.executable, "-u", os.path.join(TOOLS, fname)], cwd=ROOT, env=env,
                                capture_output=True, text=True, encoding="utf-8", errors="replace",
                                timeout=TIMEOUT_S)
             # stderr first so the suite's own verdict (stdout) is the last line.

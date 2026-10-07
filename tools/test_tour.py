@@ -22,6 +22,12 @@ os.environ["JUSTATUNER_CONFIG_DIR"] = tempfile.mkdtemp(prefix="jat-tour-test-")
 if not hasattr(builtins, "_"):
     builtins._ = lambda s: s
 
+import faulthandler  # noqa: E402
+# A GUI suite that hangs must say where: dump every thread's stack to
+# stderr and exit after four minutes (a Windows CI runner hung test_tour
+# for the runner's whole 600 s with no output, 2026-10-06).
+faulthandler.dump_traceback_later(240, exit=True)
+
 import tkinter as tk  # noqa: E402
 from tkinter import messagebox  # noqa: E402
 
