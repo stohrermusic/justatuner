@@ -1,0 +1,24 @@
+# Ruff config. Runs as:  ruff check .   (CI's lint job runs exactly this)
+target-version = "py311"
+line-length = 120
+
+# `_` is installed into builtins by main.py (identity function; the tuner
+# view code came from SSC with gettext-style `_()` wrapping). Tell ruff so
+# it doesn't flag it as undefined.
+builtins = ["_"]
+
+[lint]
+# E = pycodestyle errors, F = pyflakes: the rules that find real bugs
+# (unused imports, undefined names, redefinitions). The ignored ones are
+# stylistic and tkinter-heavy code trips them constantly without benefit.
+select = ["E", "F"]
+ignore = [
+    "E501",  # line too long
+    "E701",  # multi-statement on one line — common in tkinter callbacks
+    "E731",  # lambda assignment — also common in tk callbacks
+    "E741",  # ambiguous variable names (l, I, O)
+]
+
+[lint.per-file-ignores]
+# Test scripts insert sys.path (and set the config override) before importing the app.
+"tools/*.py" = ["E402"]

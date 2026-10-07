@@ -1089,7 +1089,6 @@ class ExerciserView:
     def _draw_waveform(self):
         """Horizontal oscilloscope: mic amplitude across the screen, time
         left → right. Reads pitch stability and tone color at a glance."""
-        import time as _time
         scope = self.scope
         if not scope._bezel_drawn:
             scope.draw_bezel()
@@ -1906,10 +1905,7 @@ class ExerciserView:
         bx, by = branch["x"], branch["y"]
         tip_x = bx + perp_x * L + fwd_x * (L * 0.25)
         tip_y = by + perp_y * L + fwd_y * (L * 0.25)
-        # Two side points define the teardrop's widest cross-section
-        # at ~40% from the base.
-        side_along_x = perp_x * (W * 0.5)
-        side_along_y = perp_y * (W * 0.5)
+        # The teardrop's widest cross-section sits ~40% from the base.
         mid_x = bx + perp_x * (L * 0.4) + fwd_x * (L * 0.08)
         mid_y = by + perp_y * (L * 0.4) + fwd_y * (L * 0.08)
         # Polygon: base — mid+fwd-perp — tip — mid-fwd-perp — base.

@@ -14,7 +14,6 @@ except ImportError:
 
 from audio_utils import open_input_stream, open_output_stream
 from exerciser.pitch import yin_detect, moving_median_filter
-from exerciser.intervals import note_freq
 
 _log = logging.getLogger(__name__)
 
