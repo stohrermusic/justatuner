@@ -1,7 +1,9 @@
 """Audio engine: drone synthesis and microphone input with pitch detection."""
 
 import logging
+import math
 import os
+import struct
 import threading
 import time
 import wave
@@ -607,7 +609,9 @@ class AudioEngine:
                 raise ValueError("No sample loaded to save.")
             sample = self._drone_sample.copy()
             sr = int(self._drone_sample_sr or self.sr)
-        pcm16 = (np.clip(sample, -1.0, 1.0) * 32767.0).astype("<i2")
+        # Round, don't truncate: astype() alone cost up to 2 LSB per sample
+        # on the round trip (tools/test_sample_pipeline.py, 2026-10-06).
+        pcm16 = np.round(np.clip(sample, -1.0, 1.0) * 32767.0).astype("<i2")
         with wave.open(path, "wb") as w:
             w.setnchannels(1)
             w.setsampwidth(2)
@@ -628,12 +632,12 @@ class AudioEngine:
         2. Run YIN on the trimmed middle to find the fundamental
            frequency. Used both for the playback-rate math AND for
            sizing the crossfade.
-        3. Equal-power crossfade between the tail and the head — the
-           last N samples become ``tail * cos(πi/2N) + head * sin(πi/2N)``,
-           so when the playback head wraps from index L-1 back to 0
-           the transition is seamless. Crossfade length is 4 periods
-           of the fundamental, capped at 150 ms or 25% of the sample
-           length, with a 64-sample floor.
+        3. Trim the sample to a whole number of periods of that pitch and
+           blend its tail into its head with a linear crossfade that is
+           itself a whole number of periods (4, fewer under the 150 ms /
+           25 % caps): head and tail are then in phase, the level stays
+           flat through the fade, and the wrap from the last sample back
+           to the first lands on the next sample of the waveform.
 
         Result is a sample that loops without the audible click a
         plain mod-wrap would produce on most instrument tones.
@@ -663,29 +667,31 @@ class AudioEngine:
             freq = 440.0
             conf = conf or 0.0
 
-        # ---- 3. Equal-power crossfade at the loop boundary ----
-        # 4 periods of fundamental is enough for the ear to read the
-        # boundary as a smooth fade-through, not a butt-splice.
-        period_samples = int(sr / freq) if freq > 0 else int(sr * 0.01)
-        crossfade_len = min(
-            4 * period_samples,
-            int(0.15 * sr),     # 150 ms cap
-            N // 4,             # don't fade more than 25% of the sample
-        )
-        crossfade_len = max(crossfade_len, 64)  # floor
+        # ---- 3. Period-aligned linear crossfade at the loop boundary ----
+        # The loop is a whole number of periods of the detected pitch, and
+        # so is the crossfade: then the head and the tail of a steady tone
+        # are in phase, a linear (constant-sum) blend keeps the level flat,
+        # and the wrap from the last sample back to the first lands on the
+        # next sample of the waveform. Measured 2026-10-06 on a 220 Hz
+        # tone: the old int()-truncated 4-period fade (800 of 801.8
+        # samples) plus equal-power curves gave a seam 2.8x a normal step
+        # and a +3/-4 dB swell once per loop, which also pushed a
+        # recording normalised to 0.95 past full scale. Four periods is
+        # enough for the ear to read the boundary as a fade, not a splice.
+        period = sr / freq if freq > 0 else sr * 0.01
+        N = int(round(math.floor(N / period) * period)) if N >= 2 * period else N
+        sample = sample[:N]
+        cap = min(int(0.15 * sr), N // 4)   # 150 ms, and never more than 25 %
+        n_periods = min(4, max(1, int(cap // period)))
+        crossfade_len = int(round(n_periods * period))
+        crossfade_len = max(64, min(crossfade_len, cap))
 
         if N > 2 * crossfade_len and crossfade_len >= 16:
             head = sample[:crossfade_len].copy()
             tail_idx = N - crossfade_len
             tail = sample[tail_idx:].copy()
-            # Equal-power (constant-RMS) curves: tail rolls off as
-            # cos, head fades in as sin, so their squared sum is
-            # 1.0 everywhere — no energy dip across the crossfade.
-            i = np.arange(crossfade_len, dtype=np.float32)
-            t = i / max(1, crossfade_len - 1)
-            tail_w = np.cos(t * np.pi / 2)
-            head_w = np.sin(t * np.pi / 2)
-            sample[tail_idx:] = (tail * tail_w + head * head_w).astype(np.float32)
+            t = np.arange(crossfade_len, dtype=np.float32) / max(1, crossfade_len - 1)
+            sample[tail_idx:] = (tail * (1.0 - t) + head * t).astype(np.float32)
 
         with self._sample_lock:
             self._drone_sample = sample
@@ -748,37 +754,76 @@ class AudioEngine:
 
 # ----- WAV file reader -----
 
+def _read_float_wav(path):
+    """Read an IEEE-float WAV (format tag 3, or extensible with the float
+    sub-format): the stdlib `wave` module refuses those outright
+    ("unknown format: 3"). Returns (float32 interleaved samples, channels,
+    sample rate) or None when the file is not a float WAV."""
+    with open(path, "rb") as f:
+        if f.read(4) != b"RIFF":
+            return None
+        f.read(4)
+        if f.read(4) != b"WAVE":
+            return None
+        fmt = None
+        data = None
+        while True:
+            hdr = f.read(8)
+            if len(hdr) < 8:
+                break
+            cid, size = struct.unpack("<4sI", hdr)
+            body = f.read(size) if cid in (b"fmt ", b"data") else (f.seek(size, 1) or b"")
+            if size % 2:
+                f.seek(1, 1)                  # chunks are word-aligned
+            if cid == b"fmt ":
+                fmt = body
+            elif cid == b"data":
+                data = body
+                break
+    if fmt is None or data is None or len(fmt) < 16:
+        return None
+    tag, channels, sr, _, _, bits = struct.unpack("<HHIIHH", fmt[:16])
+    if tag == 0xFFFE and len(fmt) >= 40:
+        tag = struct.unpack("<H", fmt[24:26])[0]   # sub-format's first word
+    if tag != 3 or bits not in (32, 64):
+        return None
+    dtype = "<f4" if bits == 32 else "<f8"
+    usable = len(data) - len(data) % (bits // 8)
+    samples = np.frombuffer(data[:usable], dtype=dtype).astype(np.float32)
+    return samples, channels, sr
+
+
 def _read_wav_file(path):
     """Read a WAV file → (mono float32 numpy array in -1..1, sample rate).
 
-    Handles 16-bit, 24-bit, and 32-bit PCM, plus 32-bit float WAVs.
-    Stereo files are downmixed to mono by averaging channels.
+    Handles 16-bit, 24-bit and 32-bit PCM through the stdlib `wave`
+    module, and 32/64-bit IEEE-float WAVs through _read_float_wav (`wave`
+    refuses format tag 3). Stereo files are downmixed to mono by averaging.
     """
-    with wave.open(path, 'rb') as w:
-        n_channels = w.getnchannels()
-        samp_width = w.getsampwidth()
-        sr = w.getframerate()
-        n_frames = w.getnframes()
-        raw = w.readframes(n_frames)
+    try:
+        with wave.open(path, 'rb') as w:
+            n_channels = w.getnchannels()
+            samp_width = w.getsampwidth()
+            sr = w.getframerate()
+            n_frames = w.getnframes()
+            raw = w.readframes(n_frames)
+    except wave.Error as e:
+        found = _read_float_wav(path)
+        if found is None:
+            raise ValueError(f"Unsupported WAV format: {e}") from e
+        data, n_channels, sr = found
+        if n_channels > 1:
+            data = data.reshape(-1, n_channels).mean(axis=1)
+        return np.clip(data, -1.0, 1.0).astype(np.float32), sr
 
-    # wave can't tell us float-vs-int — but PCM WAVs report a known
-    # sample width (2/3/4 bytes) and float WAVs report 4 bytes with
-    # a different format tag we can't read via the stdlib `wave`
-    # module. The float case is rare for the kinds of files users
-    # will load here (instrument samples are almost always int16),
-    # so we default to int and document the limitation.
     if samp_width == 2:
         data = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
     elif samp_width == 4:
-        # Could be int32 or float32; pick by range probing the first
-        # ~1k samples — if any |sample| > 1.5, it's int32.
-        i32 = np.frombuffer(raw, dtype=np.int32)
-        f32 = np.frombuffer(raw, dtype=np.float32)
-        probe = f32[: min(1024, len(f32))]
-        if probe.size and np.max(np.abs(probe)) <= 1.5:
-            data = f32.astype(np.float32)
-        else:
-            data = i32.astype(np.float32) / 2147483648.0
+        # `wave` only opens PCM, so 4 bytes is int32. The old "probe the
+        # first 1024 samples as float32" guess read any int32 file that
+        # starts quietly (leading silence) as float bit patterns: NaN and
+        # 1e38 into the drone (tools/test_sample_pipeline.py, 2026-10-06).
+        data = np.frombuffer(raw, dtype=np.int32).astype(np.float32) / 2147483648.0
     elif samp_width == 3:
         # 24-bit PCM — unpack three bytes at a time, sign-extend to int32.
         arr = np.frombuffer(raw, dtype=np.uint8).reshape(-1, 3)

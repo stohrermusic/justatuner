@@ -1,5 +1,7 @@
 """YIN pitch detection algorithm for monophonic audio."""
 
+import math
+
 import numpy as np
 
 
@@ -19,7 +21,10 @@ def yin_detect(signal, sample_rate, fmin=80, fmax=2000, threshold=0.25):
     """
     N = len(signal)
     tau_min = max(2, int(sample_rate / fmax))
-    tau_max = min(N // 2, int(sample_rate / fmin))
+    # +2 so a tone AT fmin is inside the search: int(sr/fmin) truncates the
+    # period and the search stops at tau_max - 2, so 55 Hz was undetectable
+    # with fmin=55 and an A1 sample fell back to 440 Hz (2026-10-06).
+    tau_max = min(N // 2, int(math.ceil(sample_rate / fmin)) + 2)
 
     if tau_max <= tau_min:
         return None, 0.0
