@@ -49,6 +49,16 @@ def check(name, fn):
         results.append(False)
 
 
+def _run(app, seconds):
+    """Let the app's timers run, then return. Never root.update() while an
+    engine's animate loop is live: on a slow runner a canvas frame outlasts
+    its 16 ms interval and update() keeps servicing the already-due
+    reschedule forever (the Windows CI runner, 2026-10-06; SSC measured a
+    25 s stall the same way)."""
+    app.root.after(int(seconds * 1000), app.root.quit)
+    app.root.mainloop()
+
+
 def _toplevels(root):
     return [w for w in root.winfo_children() if isinstance(w, tk.Toplevel)]
 
@@ -105,9 +115,9 @@ def main():
     app.notebook.select(app.tuner_frame)
     app.tuner._tuner_engine.synthetic_hz = 440.0
     app._on_tab_changed()
-    app.root.update()
+    _run(app, 0.5)
     app.tuner._tuner_open_settings()
-    app.root.update()
+    _run(app, 0.3)
     dlg = [w for w in _toplevels(app.root) if w.title() == "Tuner Settings"]
     check("Tuner > Settings... opens a 'Tuner Settings' window (lazy imports resolved)", lambda: len(dlg) == 1)
     if dlg:
@@ -120,18 +130,18 @@ def main():
         check("the FPS checkbox toggles show_fps",
               lambda: checks and (checks[0].invoke() or app.tuner._tuner_show_fps.get() is True))
         dlg[0].destroy()
-    app.root.update()
+    _run(app, 0.2)
 
     # ---- latency dialog opens and closes without running ----
     app._open_latency_test()
-    app.root.update()
+    _run(app, 0.3)
     lat = [w for w in _toplevels(app.root) if w.title() == "Audio Latency Test"]
     check("Help > Test Audio Latency... opens its dialog", lambda: len(lat) == 1)
     check("a second open just raises the same dialog",
           lambda: (app._open_latency_test() or True) and len([w for w in _toplevels(app.root) if w.title() == "Audio Latency Test"]) == 1)
     if lat:
         lat[0].destroy()
-        app.root.update()
+        _run(app, 0.2)
     check("closing it clears the handle", lambda: app._latency_dialog is None)
     check("tuner still running on its tone after the dialogs", lambda: app.tuner._tuner_running)
 
