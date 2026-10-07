@@ -533,6 +533,11 @@ def run_tour(app, shots_dir=None, step_ms=1500, on_done=None, appearance=None):
         app.tuner.start()
 
     def open_drone():
+        # A JI major third above the root, so the analysis panel and the
+        # visualizers have a signal on a machine with no microphone.
+        from exerciser.intervals import note_freq
+        ex = app.exerciser
+        ex.engine.synthetic_hz = note_freq(ex.root_note, ex.octave) * 5.0 / 4.0
         app.notebook.select(app.exerciser_frame)
         app._on_tab_changed()
 
@@ -669,17 +674,24 @@ def _selftest():
         # withdrawn root, so this says whether the GPU module is present.
         renderer = "GPU wheel bundled" if app.tuner._tuner_use_gpu else "canvas"
 
+        # Drone tab on a synthetic JI major third above its root (C3 by
+        # default): the analysis must name the interval.
+        from exerciser.intervals import note_freq
+        ex = app.exerciser
+        ex.engine.synthetic_hz = note_freq(ex.root_note, ex.octave) * 5.0 / 4.0
         app.notebook.select(app.exerciser_frame)  # queued event -> drone starts, tuner stops
-        root.after(1000, root.quit)
+        root.after(1500, root.quit)
         root.mainloop()
-        if not app.exerciser._running or app.tuner._tuner_running:
+        if not ex._running or app.tuner._tuner_running:
             raise RuntimeError("tab switch did not hand the audio to the drone tab")
-        mic = app.exerciser.engine.input_error
+        interval = ex.interval_label.cget("text")
+        if interval != "Major 3rd":
+            raise RuntimeError(f"drone analysis read {interval!r}, expected 'Major 3rd'")
         app.tuner.stop()
-        app.exerciser.stop()
+        ex.stop()
         _say(f"SELFTEST OK: {APP_VERSION} on {sys.platform}, frozen={getattr(sys, 'frozen', False)}, "
              f"tuner {frames} frames, readout {note}, renderer {renderer}, "
-             f"drone mic {'ok' if mic is None else 'no input (' + mic + ')'}")
+             f"drone {interval} on {ex.engine._synth_pos // 4096} blocks")
     except BaseException:
         _say("SELFTEST FAIL:\n" + traceback.format_exc())
         os._exit(1)

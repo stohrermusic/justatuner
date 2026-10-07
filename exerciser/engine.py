@@ -12,7 +12,7 @@ try:
 except ImportError:
     sd = None
 
-from audio_utils import open_input_stream, open_output_stream
+from audio_utils import open_input_stream, open_output_stream, synthetic_tone
 from exerciser.pitch import yin_detect, moving_median_filter
 
 _log = logging.getLogger(__name__)
@@ -78,6 +78,13 @@ class AudioEngine:
         self._last_input_time = 0.0     # monotonic time of last input callback
         self._last_input_attempt = 0.0  # monotonic time of last open attempt
         self._last_nonzero_time = 0.0   # monotonic time of last non-zero sample
+        # Synthetic source (same hook as TunerEngine.synthetic_hz): when set
+        # (Hz), start() opens no microphone and get_pitch() feeds a
+        # harmonic-rich tone into the input ring itself, so the drone tab
+        # runs end to end on a machine with no input device (CI, the
+        # --selftest, the --tour). Never set in normal use.
+        self.synthetic_hz = None
+        self._synth_pos = 0
 
         # Instrument/detection settings
         self._fmin = 65
@@ -152,8 +159,25 @@ class AudioEngine:
         self._start_input_stream()
         self._start_output_stream()
 
+    def input_open(self):
+        """True while the mic stream (or the synthetic source) delivers."""
+        return self._input_stream is not None or bool(self.synthetic_hz)
+
+    def _feed_synthetic(self):
+        """Next block of the synthetic tone into the input ring, the way the
+        audio callback would: fundamental plus two harmonics at -6/-12 dB."""
+        block = synthetic_tone(self._synth_pos, INPUT_BLOCK, float(self.synthetic_hz),
+                               self.in_sr, harmonics_db=(0.0, -6.0, -12.0))
+        self._synth_pos += INPUT_BLOCK
+        self._push_input(block)
+
     def _start_input_stream(self):
         """Start (or restart) the input stream."""
+        if self.synthetic_hz:
+            self._input_stream = None
+            self.input_error = None
+            self._synth_pos = 0
+            return
         if self._input_stream is not None:
             try:
                 self._input_stream.stop()
@@ -222,7 +246,7 @@ class AudioEngine:
         directly. Paced by INPUT_RETRY_S so a genuinely absent device
         doesn't hammer PortAudio.
         """
-        if not self.running:
+        if not self.running or self.synthetic_hz:
             return
         now = time.monotonic()
         if self._input_stream is None:
@@ -309,6 +333,8 @@ class AudioEngine:
 
     def get_pitch(self):
         """Get the latest detected pitch. Returns (freq_hz, confidence)."""
+        if self.synthetic_hz and self.running:
+            self._feed_synthetic()
         self._check_input_health()
         with self.buffer_lock:
             if not self.buffer_ready:
@@ -377,8 +403,12 @@ class AudioEngine:
         return np.fft.irfft(spectrum, n)
 
     def _input_callback(self, indata, frames, time_info, status):
+        self._push_input(indata[:, 0].copy())
+
+    def _push_input(self, data):
+        """One block of mono input into the ring, the Lissajous buffer and
+        the recording, from the audio callback or the synthetic source."""
         self._last_input_time = time.monotonic()
-        data = indata[:, 0].copy()
         if data.any():
             self._last_nonzero_time = self._last_input_time
         with self.buffer_lock:

@@ -672,7 +672,7 @@ class ExerciserView:
             return
         eng = self.engine
         err = eng.input_error
-        if not self._running or eng._input_stream is None:
+        if not self._running or not eng.input_open():
             state, text, fg = "dark", (f"No input: {err}" if err else ""), "#FF6060"
         elif eng.silent_seconds() > SILENT_WARN_S:
             state, text, fg = "amber", "no signal", COLOR_AMBER
