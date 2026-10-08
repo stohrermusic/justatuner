@@ -71,62 +71,7 @@ python main.py --selftest              # SELFTEST OK / SELFTEST FAIL, exit 0/1
 python main.py --tour all --shots DIR [--appearance dark]   # screenshot every stop
 ```
 
-Each `tools/test_*.py` is a standalone script, not pytest; the runner executes each in its own interpreter from the repo root (same as SSC). Twelve suites as of 2026-10-07, about 95 s locally, about 440 checks. `tools/measure_bleed.py` is a measuring tool, not a test: it plays the drone through the real speakers and reports what the real mic hears. Every engine built in a test stubs its stream openers or uses `synthetic_hz`; see the traps.
-
-- `test_tuner_engine` — pure math, no display: the Hann estimator on a pure lobe (<0.01 bin) and on a decaying note, in-tune A1–A6 sweeps (pure sine <0.5 c; with a −6 dB H2 <1.0 c, C2–A6 <0.5 c), off-pitch A2–A5 within 0.15 c, the strobe standing still on an in-tune note, B5 26 c flat, numpy surviving a blocked sounddevice (child interpreter), and the synthetic source through `analyze()`.
-- `test_audio_utils` — the ring buffer, `synthetic_tone` phase continuity, the estimator's climb and clamp, the sample-rate fallback for input and output on a fake sounddevice, `TunerEngine` on a 16 kHz device, the saved-device fallback, the stale-stream restart, `silent_seconds`.
-- `test_exerciser_engine` — YIN over C2–C7 at 44.1 kHz and D2–C6 at 16 kHz, the JI interval math, note naming, transposition, presets and voicings, `get_pitch` on the synthetic source, headphones mode untouched, the sample-drone notch documented.
-- `test_drone_cancel` — the speakers-mode cancellation on a simulated room (delay, echo, noise, clock drift): the drone alone reads no pitch (53 dB of the fundamental removed), just intervals over the bleed within 0.02 c, a locked unison held 30 s is not learned away, 50 ppm drift still cancelled after 60 s, headphones mode exact, a note change re-listens, the room table (back to a known chord with 20 ppm drift and no new listen: 59.8 dB removed, ppm learned within 0.1), the click-free chord change, the sample drone keeps the notch.
-- `test_progression` — notation round trips and rejections, timing in all three modes, presets, save/load, and the player on a fake clock and a fake engine: count-in, step changes at 2/4/6/8 s at 120 bpm, looping, next(), the calibration sequence and its skip, manual mode.
-- `test_sample_pipeline` — the WAV reader (16/24/32-bit PCM, float32/float64, stereo), sample install (trim, pitch, period-aligned crossfade, seam, level), pitched playback, synth output, recording, save and clear.
-- `test_config` — settings load/merge/corruption/round trip, device resolution by name, prefix and legacy index, the device filter, logging.
-- `test_audio_latency` — the loopback measurement on a mocked device: delays, noise, echo cancellation, disagreeing chirps, rate fallback.
-- `test_gpu_tuner` — the `tuner_render` API, the renderer.rs / view.py source contract, a 3500×1500 surface, `adapter_info` / `present_mode`, 60 frames timed, and the 30-failure fallback on the real app. Skips the wheel-dependent parts when the wheel is not built (set `JUSTATUNER_REQUIRE_GPU=1` on a machine that built it to make a broken wheel fail loudly) and the construction cases on a runner with no GPU surface.
-- `test_tuner_canvas` — the real tuner tab end to end: pass 0 no mic (error text drawn and surviving a rebuild, MIC lamp dark), pass 1 canvas mode on the synthetic tone (12 wheels, A brightest, readout A / IN TUNE, lamp green, 0 c through the live path), pass 2 the GPU build (live renderer with zero failures, or the designed fallback with the CPU-mode notice).
-- `test_drone_tab` — the real drone tab end to end on a just major third above its root: Major 3rd, 5:4, LOCKED, "Playing: E3", the ET-difference line, Bb transposition, every visualizer mode drawing without a Tk exception, the "Phase Wheel" mode migration, a progression in seconds mode whose interval readings follow the moving root (Major 3rd → Major 7th → Major 6th → Major 3rd), manual mode on the space key (and not from a text field), the Next button, drone-off stops it, tab switch, save.
-- `test_tour` — `run_tour` with screenshots off as a gate on every platform (14 stops, no error), Tuner Settings opening with "System Default", the latency dialog, the progression editor (preset pick, bad-chord status line, the picker, Save, Use, Delete).
-
-Rules the suites follow, each from a trap above: an isolated profile via **`JUSTATUNER_CONFIG_DIR`** set before `config` is imported (never the user's settings); `builtins._` installed before importing `tuner.view`; `tkinter.messagebox` stubbed so the exception hook's dialog cannot block; **`JustATunerApp(autostart=False)`** so the test sets `synthetic_hz` before the first start and starts via `app._on_tab_changed()`; frames driven with `root.after(ms, root.quit); root.mainloop()`, never a `root.update()` loop; `check()` fails on a returned `False` as well as on an exception.
-
-**`--selftest`** (`_selftest()` in main.py) builds both tabs in a withdrawn root, runs the tuner on the synthetic tone (≥20 frames, readout A, no error state), switches to the drone tab on a synthetic just major third and requires the panel to say "Major 3rd", and exits 0/1 without saving. CI runs it against the frozen binary on every platform — the one check that runs the shipped bundle. **`--tour all --shots DIR`** (`run_tour()`) walks 12 stops — tuner with the real mic, tuner on the tone, Tuner Settings, the drone tab in all six visualizer modes, the latency dialog, the user guide — screenshots each cropped to the app's windows, and writes `tour-done.txt` with each shot's mean brightness and any step errors. Help > About is a native messagebox and is not toured. Modal stops work because each stop's finish is scheduled with `after()` before its open is called. The macOS build job runs the tour light and dark and uploads `mac-tour`; those pictures are how the Mac UI gets reviewed. Driven on this PC (2026-10-06, 12 shots, three findings fixed); not yet seen on a Mac.
-
-## Smoke Testing Patterns
-
-Patterns that caught real bugs during the v1.1.3 work; use them before claiming a UI or audio change works:
-
-- **Drive the real app on a hidden root.** `app = main.JustATunerApp(autostart=False); app.root.withdraw()`, then drive frames with `app.root.after(ms, app.root.quit); app.root.mainloop()` (not a `root.update()` loop — see the traps). Select tabs with `app.notebook.select(app.exerciser_frame)` (the queued tab event starts that tab), poke engine state, read widgets. Withdrawing avoids flashing a window at whoever is watching the screen (and them closing it mid-test). Widget sizes are still available via `winfo_reqheight()`; wheels are not built while the frame is unviewable, but the readout labels still update.
-- **Monkeypatch `tkinter.messagebox`** (`showerror`/`showinfo`/`showwarning` to print) before importing `main`, or the exception hook's error dialog blocks the update loop forever.
-- **Open the lazy-import dialogs.** `tuner/view.py`'s settings dialog imports `config.get_input_devices` and `ui_dialogs.add_tooltip` *inside* `_tuner_open_settings`, so `import tuner.view` succeeding proves nothing; two releases shipped with the dialog raising ImportError. Call `app.tuner._tuner_open_settings()` and confirm a `Tuner Settings` Toplevel appears.
-- **Mock sounddevice for the macOS-only paths.** Windows MME accepts any sample rate (it resamples), so the CoreAudio "Invalid sample rate" fallback never fires here. Set `tuner.engine.sd = FakeSD` where `FakeSD.InputStream` raises on 44100 and `query_devices` reports a 16 kHz default, then feed `engine._ring_buffer.write(sine)` and check `analyze()` lights the right wheel.
-- **Silence detection can't be tested with the real mic** (it keeps resetting the timer); stub `engine.silent_seconds = lambda: 10.0` for the UI path and call `_audio_callback` with zeros/non-zeros directly for the engine path.
-- **`python audio_latency.py`** runs the loopback latency test standalone. On the dev laptop the Intel Smart Sound mic array cancels its own speaker output, so use the Realtek "Stereo Mix" input to validate the pipeline, or mock `sd.playrec` to return a delayed copy of the signal.
-- **Lint**: `ruff check --select F,E9 <files>`. `tuner/view.py` has ~43 baseline `F821 Undefined name _` hits because `main.py` injects `_` as a builtin; compare counts against `git show HEAD:<file>` rather than reading the raw total.
-
-## Building Executables
-
-```bash
-# Build for current platform (Win/Linux: single binary, macOS: .app bundle)
-python build.py
-
-# Clean and rebuild
-python build.py --clean
-```
-
-PyInstaller picks up the `tuner/`, `exerciser/`, and `audio_utils.py` packages via the import graph from `main.py` — no `--add-data` needed for source. Pillow's native libraries get bundled automatically (~5–10 MB).
-
-**GPU tuner renderer**: `build.py` adds `--hidden-import tuner_render` only when that extension is importable, so a *local* `python build.py` bundles the GPU renderer only if you've built and installed it first:
-
-```bash
-pip install maturin
-python -m maturin build --release --manifest-path tuner_renderer/Cargo.toml
-pip install --find-links tuner_renderer/target/wheels tuner_render
-```
-
-CI does this on the Windows and Linux runners (Rust via `dtolnay/rust-toolchain@stable`); the macOS runner skips it because macOS is canvas-only (see Per-Platform Constraints). Without the extension the build is canvas-only and `tuner/view.py` falls back at runtime — which is exactly how v1.0.0 silently shipped CPU-only.
-
-**macOS microphone permission**: on macOS the build runs `_patch_macos_plist()` after PyInstaller, injecting `NSMicrophoneUsageDescription` into `dist/JustATuner.app/Contents/Info.plist`. macOS *silently* denies mic access to any app that doesn't declare it — the tuner wheels never move and the drone analyzer sees no input — and PyInstaller doesn't add the key. This mirrors SSC's `build.py`; the SSC extraction originally dropped the step (restored on `beta`).
-
-The key alone is **not sufficient**: PyInstaller ad-hoc signs the bundle during build, and Info.plist is sealed into that signature. Patching the plist afterwards breaks the seal, and TCC refuses to show the permission prompt for an app whose signature doesn't validate — same silent-denial symptom, mic key present. v1.1.0 and v1.1.1 shipped this way. `_resign_macos_app()` therefore re-signs ad-hoc (`codesign --force --deep --sign -`) after the patch. Packaging matters too: CI zips the `.app` with `ditto -c -k --keepParent`, because `zip -r` follows the bundle's Frameworks↔Resources symlinks and stores them as duplicate files, breaking the resource seal on extraction. CI verifies all of it — `plutil -extract` for the key, `codesign --verify --deep --strict` on the built app, and again on an unzipped copy of the final artifact.
+The suites, the rules they follow, `--selftest` and `--tour`, and the smoke-test patterns are in **CLAUDE-testing.md**. Every engine built in a test stubs its stream openers or uses `synthetic_hz`; see the traps.
 
 ## Module Structure
 
@@ -210,142 +155,6 @@ installer.iss           → Inno Setup script for Windows installer
 
 **Sample rate is negotiated, never assumed**: both engines *prefer* 44.1 kHz but open through `audio_utils.open_input_stream()`/`open_output_stream()`, which retry at the device's `default_samplerate` when it refuses. Windows and PulseAudio resample transparently so the retry never fires there; CoreAudio does not, and a Bluetooth HFP mic (16/24 kHz) or an interface pinned to 48 kHz raises "Invalid sample rate". `TunerEngine.sample_rate`, `AudioEngine.in_sr` (mic) and `AudioEngine.sr` (drone output) hold the live rates and every bit of frequency math reads them — the `SAMPLE_RATE` constants are only the preference.
 
-## Audio Engines
-
-### Tuner engine (`tuner/engine.py`)
-
-12 chromatic pitch classes, each with seven concentric rings (one per octave). FFT-based pitch detection with per-pitch-class phase tracking — phase deviation drives the stroboscopic rotation effect. Magnitude normalization is gated: `max_mag` must exceed `threshold * 1.5` before normalizing to 0–1, otherwise all magnitudes are zeroed. This prevents sensitive mics from showing wheel activity on room noise.
-
-Peak frequency (both the per-ring estimate and the strongest-octave estimate that drives the VU and the wheel phase) comes from `audio_utils.hann_peak_freq`, the Hann closed form — not a parabola, which read in-tune low notes up to 15 c off (see the traps). Magnitudes are read as before.
-
-`synthetic_hz` (default None) is the test/CI source: when set, `start()` opens no stream, sizes the ring buffer itself, and `analyze()` feeds `audio_utils.synthetic_tone` (fundamental + −6 dB H2, phase-continuous from `_synth_pos`) before the stale check. `silent_seconds()` stays 0 (no stream), so the MIC lamp reads green. Nothing in normal use sets it.
-
-Audio stream health monitoring via `AudioRingBuffer.is_stale()` — if no new audio data arrives for ~1 second, the engine restarts the sounddevice stream. Recovers from silent callback death on Windows. The ring buffer is sized at open to `max(rate × 0.2 s, FFT_SIZE)` so a 16 kHz stream still fills one FFT frame.
-
-`start(device)` falls back to the system default when the requested device won't open (unplugged since it was saved, grabbed exclusively, index shifted) and logs a warning; `_last_device` is updated so auto-restarts stay on the working device.
-
-### Exerciser engine (`exerciser/engine.py`)
-
-Drone synthesizer + mic input + pitch detection in one class. Two independent rates: `in_sr` (mic; YIN, drone cancellation, Lissajous reference sine, recording) and `sr` (drone output; oscillator phase increments, sample playback rate). Input health is checked on the `get_pitch()` timer by `_check_input_health()`: if the input callback has been silent for `INPUT_STALE_S` (1.5 s) or the stream never opened, it reopens, paced by `INPUT_RETRY_S` (3 s) so an absent mic doesn't hammer PortAudio. `input_error` (None when healthy) drives the drone tab's **MIC** status line via `ExerciserView._update_mic_status`.
-
-`_rebuild_oscillators` builds a per-voice list `_osc_freqs = [(freq, amp), ...]` driven by the current voicing (one of the eleven just-ratio chords in `VOICINGS`) and sound type:
-
-- **sine**: one oscillator per voice
-- **rich**: 8 partials per voice — the fundamental plus harmonics 2–8 at decreasing amplitude (8 / 16 / 24 oscillators for root / fifth / triad voicings)
-- **sample**: one playhead per voice through the loaded `_drone_sample` buffer
-
-`synthetic_hz` (default None) is the same test/CI hook `TunerEngine` has: `start()` opens no microphone, `get_pitch()` feeds a harmonic-rich tone through the callback's own path (`_push_input`), health checks stand down, and `input_open()` tells the MIC lamp the source is live.
-
-**Drone-bleed cancellation** (`monitoring`, Exerciser Options > Monitoring, persisted; default "speakers"). The app generates the drone, so each sine/rich partial arrives at the mic as the same tone with one complex gain. When the drone starts, changes note, voicing or type, `_bleed_reset()` starts a listen: `BLEED_SETTLE_S` (0.4 s) for the sound to reach the mic, then `BLEED_LISTEN_S` (3 s) of Hann-windowed projections of the input ring onto every partial (`_bleed_project`), then `_bleed_fit()` gives each partial a gain at `_bleed_tref` and a phase-drift rate (the mic and speaker clocks differ by a few ppm). While listening `get_pitch()` returns no pitch and the view's DRONE line says "Listening to the room…". Once ready, `_cancel_drone` subtracts the predicted bleed and tracks the gains with a 4 s time constant only while no pitch has been detected for `BLEED_PAUSE_S`, so a held unison is never learned as bleed. "headphones" skips all of it; a WAV-sample drone keeps the old ±4 Hz notch (`_notch_drone`). All timing is in input-sample time (`_in_total`), so `test_drone_cancel` runs a simulated room faster than real time. `tools/measure_bleed.py` runs the same thing on real devices and prints per-partial level, drift and what the tab would read.
-
-**The room table** (2026-10-07). The synth renders from a voice set (`_synth`) that the output callback swaps in from `_synth_pending` at a block boundary, crossfading over the first block (`CHORD_XFADE_FRAMES`) so a chord change does not click, and recording the output sample index at which the new phases started from zero (`epoch`, on `_out_total`). Every listen banks, per partial frequency, the amplitude and the phase relative to that epoch (`_room`, `_room_store`), plus one clock-difference number for the session (`_room_ppm`, from the partials' drift rates). A chord whose partials are all in the table (`room_known`) skips the listen: after the settle, `_room_derive` rebuilds the gains from the table and the new epoch. The table is cleared whenever a stream reopens. `VOICINGS` holds eleven just-ratio chords with `VOICING_LABELS` (menu) and `VOICING_SYMBOLS` (notation).
-
-**Progressions** (`exerciser/progression.py`, the editor in `exerciser/progression_ui.py`, transport and plumbing in `ExerciserView._prog_*`). `Progression` = name + `Step`s (root, voicing, length) + mode (`bars` at a BPM with beats per bar, `seconds`, `manual` on a key) ; notation `C | F | G7:2 | Am` via `parse_steps` / `format_steps`; `PRESETS`; the user's own in `progressions.json` in the config folder. `ProgressionPlayer` is ticked from `_update_analysis` with `time.monotonic()`: in speakers mode it sounds each distinct chord not yet in the room until `bleed_status()` is "ready", then a count-in (one bar / two seconds; none in manual), then steps on time or on `next()`; `apply_chord` is the view's `_prog_apply_chord` (root button, voicing, engine). The manual-advance key is a Tk keysym (`advance_key`, default `space`), bound with `bind_all` and ignored while a text field has focus. Both the last progression and the key persist in `exerciser_settings`. MIDI entry is on the roadmap (needs a native MIDI library proven in CI first).
-
-For sample mode, `_render_sample_voices` runs in the audio callback and per-voice computes the playback rate as `(target_freq / sample_freq) * (sample_sr / output_sr)`, advances a float playhead through the sample buffer with wrap, interpolates with a Catmull-Rom cubic (4-tap; taps wrap mod-N across the crossfaded loop boundary), sums all voices, normalizes. Was 2-tap linear before v1.1.1 — cubic is audibly cleaner when a sample is pitched well away from its source note.
-
-### WAV-sample drone (`_install_sample` in `exerciser/engine.py`)
-
-Loaded WAV files and live recordings both go through `_install_sample`, which does three things before storing the buffer:
-
-1. **Trim attack + release** — up to 200ms from each end, capped at 10% of total length. Drops onset and decay so the looping region is steady-state.
-2. **Pitch detection** — YIN on a 2-second window centered on the trimmed middle (fmin 55, so A1 is in range). Used both for the per-voice playback rate AND for sizing the crossfade. Falls back to A4 (440 Hz) at low confidence.
-3. **Period-aligned linear crossfade at the loop boundary** (since 2026-10-06; see the traps for what the equal-power version did) — the sample is trimmed to a whole number of periods of the detected pitch, and the last L samples become `tail * (1 - t) + head * t` where L is a whole number of periods too (4, fewer under the 150 ms / 25 % caps, 64-sample floor). Head and tail of a steady tone are then in phase, the level stays flat through the fade, and the mod-wrap from index L-1 to 0 in `_render_sample_voices` lands on the next sample of the waveform.
-
-`_read_wav_file` at the bottom of the module handles 16/24/32-bit PCM through the stdlib `wave` module and 32/64-bit IEEE-float WAVs through `_read_float_wav` (a small RIFF reader, because `wave` refuses format tag 3). Stereo is downmixed to mono by averaging.
-
-### Recording
-
-`record_start()` / `record_stop_and_use()` / `record_cancel()` work with the existing input stream — the input callback appends each frame to `_recording_chunks` while `_recording` is True. The recording UI in `RecordSampleDialog` (`exerciser/view.py`) polls `engine.recorded_duration_s()` for the elapsed counter. 1.5-second hold-off on the Stop button so an accidental double-click can't immediately abort.
-
-### Sample persistence
-
-The active drone sample survives a restart. `ExerciserView` tracks the current sample's source path in `self._current_sample_path` and writes it to `exerciser_settings["last_sample_path"]` in `save_settings()`. On construction, if the saved `drone_type` is `"sample"` and the path still exists, it reloads via `engine.load_sample_wav()`; a missing/unreadable file falls back to the `rich` synth so the drone still sounds. Loaded WAVs persist by their own path; recordings (in-memory only) are auto-saved to `<config dir>/recordings/last_recording.wav` in `_after_record` so they have a path to remember. `engine.save_sample_wav(path)` writes the current sample as 16-bit PCM mono and backs both that auto-save and the **Drone > Sample > Save Sample As...** export.
-
-## Visualizer Modes (JI Drone tab)
-
-All six modes are draw methods on `ExerciserView`, dispatched from `_update_scope`. The render target is the `RoundScope` canvas widget (`exerciser/widgets.py`) — a `tk.Canvas` with a circular bezel + graticule drawn once and a `draw_mask()` z-order trick that keeps the bezel ring above content.
-
-| Mode | Implementation | Cost |
-|------|----------------|------|
-| **Lissajous** | `tk.Canvas` lines, drone reference sine vs mic input | Cheap; ~3 lines/frame |
-| **Waveform** | Canvas line; mic samples scaled to ±70% radius | Cheap |
-| **Spectrum** | Persistent canvas rectangles + cap lines, updated via `coords()` | Critical that items are persistent — recreating them per frame is what made the original implementation feel slow |
-| **Waterfall** | 50 persistent canvas lines, each one polyline of FFT magnitudes with perspective transform; new row pushed to front each frame | Each row stores its sprout-time hue, so the slow color cycle reads through history |
-| **Warp** | PIL framebuffer (220×220 RGB), zoom outward each frame + integer multiply decay + new audio-driven shapes via ImageDraw, pushed to canvas via `ImageTk.PhotoImage` | Circular alpha mask applied at display so corners don't poke past the bezel |
-| **Garden (beta)** | PIL framebuffer (280×280), branching plants with print-head ribbon stamping, leaves, species-styled flowers, and transient firefly overlay | See [Garden architecture](#garden-visualizer-architecture) below |
-
-**Persistent canvas items rule**: any visualizer that draws many shapes per frame must create them once and update via `.coords()` + `.itemconfigure()`. Spectrum and Waterfall were both written this way after Spectrum's first version felt slow. Tk hates `delete()` + `create_*()` churn.
-
-**PIL framebuffer rule**: Warp and Garden both apply a circular alpha mask before pushing to the canvas so their square framebuffers don't visibly protrude past the round bezel ring. The mask is cached by display size in `_get_garden_circle_mask` and shared between the two modes.
-
-**Settings migration**: invalid `visualizer_mode` values (e.g. "Phase Wheel" from the brief period that mode existed) fall back to "Lissajous" on load. See `_VALID_MODES` in `ExerciserView.__init__`.
-
-## Garden Visualizer Architecture
-
-The most involved visualizer. Sits in `_draw_garden` and a cluster of helpers (`_spawn_garden_plant`, `_garden_step_branch`, `_garden_branch_tip`, `_garden_draw_leaf`, `_garden_draw_flower`, `_draw_petal`, `_garden_scroll_left`, `_garden_step_fireflies`, `_spawn_garden_firefly`, `_garden_render_fireflies`).
-
-### Print-head ribbon model
-
-Each plant is a tree of "branches"; each branch has a print-head position (`x`, `y`), direction (`angle`), `speed`, `width`, `life`, `depth`, and a `rotation_index` for phyllotaxis. Per frame, every alive branch:
-
-1. Ages by 1; if `age >= life`, blooms a flower and dies
-2. Curves its direction by `drift` (from smoothed spectral centroid) + small bias toward vertical
-3. Advances its position by `speed * (1 + 1.5 * audio_env)` in the direction angle
-4. Stamps the current FFT cross-section as a symmetric rib perpendicular to the direction
-5. Drops a leaf if depth ≥ 1 and the leaf cooldown hit zero (alternating sides via `leaf_side`)
-6. Rolls a small per-frame chance of secondary bloom (most species have rate 0)
-
-### Branching (L-system + golden angle + apical dominance)
-
-Branching is triggered by audio amplitude peaks above 1.7× the smoothed envelope, with a 25-frame minimum gap between events. When triggered, `_garden_branch_tip` finds the most vigorous alive tip (max `(life-age) * width`), splits it into 2 children at `±GARDEN_BRANCH_FAN` from the parent direction (with a small golden-angle twist to vary which sides children take), and kills the parent.
-
-Each child inherits:
-- speed ← parent × `GARDEN_DEPTH_DECAY_SPEED` (0.78)
-- width ← parent × `GARDEN_DEPTH_DECAY_WIDTH` (0.62)
-- life  ← parent × `GARDEN_DEPTH_DECAY_LIFE`  (0.55)
-- depth ← parent + 1
-
-This is the apical-dominance idea: the original lineage's vigor is parceled out to children, who get successively smaller and shorter-lived. After `GARDEN_MAX_DEPTH` (4) generations, tips just keep extending without further splits.
-
-### Per-plant flower species
-
-Each plant rolls a `flower_style` dict at spawn time so all of its blooms match like a real species. Style axes:
-
-- `n_petals`: weighted from `(3, 5, 5, 6, 7, 8, 9, 13)` — Fibonacci-heavy, 5 doubled because pentamerous flowers dominate in nature
-- `shape`: `"round"` | `"teardrop"` | `"ray"` | `"spade"` — four petal silhouettes drawn as quad/quintuple polygons in `_draw_petal` (PIL's `ellipse` is axis-aligned so anything non-trivially rotated has to be a polygon)
-- `petal_aspect`: 0.7–1.8 ratio of radial length to side width
-- `center_ratio`: 0.25–0.65 fraction of flower radius taken by the contrasting center disc
-- `petal_overlap`: 0.9–1.25 — >1 makes neighbors touch
-- `size_scale`: 0.85–1.3 overall flower size modifier
-- `center_hue_offset`: complementary (0.5), triad (0.33), or analog (0.17), weighted toward complementary
-- `petal_rotation`: random starting angle so n-fold symmetry isn't always pointing up
-- `secondary_bloom_rate`: small per-frame chance (0..0.0015) of extra mid-branch flowers at 60% size — most species have rate 0
-
-Terminal flowers only fire at natural end-of-life (`age >= life`). Branches killed by going off-canvas or by being branched away don't flower — flowers visually mark branches that grew to maturity.
-
-### Garden composition
-
-When all branches in the current plant die, `_spawn_garden_plant` seeds a new plant `40px` to the right. Up to 8 plant records kept in memory; oldest dropped beyond that. When `_garden_next_plant_x` runs past the right edge, `_garden_scroll_left` shifts the framebuffer (and all branch x-coordinates AND the next-plant cursor AND every firefly's x-coordinate) left by 40% of canvas width — treadmill scroll.
-
-### Fireflies (transient overlay)
-
-Yellow-green dots that drift above the garden, spawning faster when sustained playing pumps `_garden_audio_env`. State per firefly: `x`, `y`, `vx`, `vy`, `phase`, `flicker_rate`, `age`, `life`, `hue`. Cap at 14 concurrent.
-
-Per frame: `_garden_step_fireflies` decrements a spawn cooldown and adds a new firefly when it hits 0. Then steps each one — random brownian-style impulse + damping + slight upward bias + phase advance. Kills any that wander out of bounds.
-
-**Fireflies are NOT written to the persistent buffer** (they'd leave trails). Instead, `_draw_garden` copies the persistent buffer each frame and `_garden_render_fireflies` paints them onto the copy as a transient overlay. Each firefly is rendered as a three-layer concentric glow stack (same trick as the tuner motor pilot), with brightness flickering via `0.55 + 0.45 * sin(phase)` and a fade-in/fade-out envelope at the start and end of life.
-
-### Audio mappings (Garden)
-
-| Audio feature | Where it goes |
-|---|---|
-| FFT log-bucketed magnitudes (18 bars) | Rib intensity profile across each branch's width |
-| Spectral centroid (smoothed) | Lateral drift on all branch directions (warm leans left, bright leans right) |
-| Smoothed RMS (`audio_env`) | Branch growth speed multiplier + firefly spawn rate boost |
-| Peak amplitude vs envelope | Branching trigger (>1.7× threshold + 25-frame gap) |
-| Hue accumulator (audio-independent) | Color cycle so old vs new plant material is visually distinct |
-
 ## Window Behavior
 
 App opens **maximized** on every platform: `state('zoomed')` on Windows, `attributes('-zoomed', True)` on Linux/X11, screen-sized geometry fallback on macOS (Aqua has no programmatic maximize). The fallback geometry is the screen size + position (0, 0); the user can drag/resize from there.
@@ -366,62 +175,6 @@ App opens **maximized** on every platform: `state('zoomed')` on Windows, `attrib
 
 Release notes file format mirrors what landed for v0.9.0 and v1.0.0: a "What's new since vX.Y.Z" section at the top (when applicable), then the standard feature lists, then Installs and Known limitations sections. Screenshots embed via `https://raw.githubusercontent.com/stohrermusic/justatuner/main/img/{tuner,drone}.png` URLs.
 
-## Release Process
-
-```bash
-# 1. Bump version in config.py and installer.iss
-# 2. Write release_notes_vX.Y.Z.md
-# 3. Commit on beta and push
-git push origin beta
-
-# 4. Merge beta into main
-git checkout main
-git pull --ff-only
-git merge --no-ff beta -m "Merge beta into main: vX.Y.Z release"
-git push origin main
-
-# 5. Create the release — triggers CI on the `release` event, which
-#    attaches all three platform binaries to the release page
-gh release create vX.Y.Z --target main --title "JustATuner vX.Y.Z" \
-    --notes-file release_notes_vX.Y.Z.md
-
-# 6. Watch the release-event run (not the push runs) and confirm all
-#    three assets landed; the release page is live before CI finishes.
-gh run list --limit 4 --json databaseId,event,status,displayTitle
-gh run watch <release run id> --exit-status --interval 30
-gh release view vX.Y.Z --json assets --jq '.assets[] | "\(.name) \(.size)"'
-```
-
-Expect roughly 36 MB for the Windows installer, 22 MB for the macOS zip (a ~70 MB zip means `zip -r` crept back in and the signature seal is broken), and 53 MB for the Linux binary. Then `git checkout beta` so the next change does not land on `main`, and update the shipped-version entry in the `TODO.md` ledger.
-
-## CI/CD (GitHub Actions)
-
-Single workflow at `.github/workflows/build.yml`. Three matrix entries:
-
-- **`windows-latest`** — Python 3.11, `pip install -r requirements.txt`, `python build.py`, then Inno Setup (`choco install innosetup`) wraps `dist\JustATuner.exe` into `JustATuner-Windows-Setup-{APP_VERSION}.exe`. Only the installer is published; the bare `.exe` is not.
-- **`macos-latest`** — Apple Silicon. Same Python install, `python build.py` produces `dist/JustATuner.app`, packaged to `JustATuner-macOS.zip` with `ditto -c -k --keepParent` (preserves the bundle's internal symlinks; `zip -r` would break the code-signature seal). CI verifies the mic key and the code signature, including on an unzipped copy of the final artifact.
-- **`ubuntu-latest`** — `apt-get install libportaudio2`, then build, rename to `JustATuner-Linux`.
-
-Before the PyInstaller step, the Windows and Linux runners install the Rust toolchain (`dtolnay/rust-toolchain@stable`) and `maturin build` the `tuner_renderer/` crate, then `pip install` the resulting `tuner_render` wheel so `build.py` bundles the GPU strobe renderer. Adds a Rust compile (~1–2 min/runner) to those builds. The macOS runner skips the Rust steps entirely — macOS is canvas-only (see Per-Platform Constraints).
-
-Triggers: push to `main` or `beta`, release `created`, manual `workflow_dispatch`. On release events, the `softprops/action-gh-release@v2` step attaches each platform's artifact to the release page (bumped from `@v1`, which ran on the soon-to-be-removed Node 20).
-
-Since 2026-10-06 the build job is preceded by a **`lint`** job (`ruff check .`, config in `ruff.toml`) and a **`test`** job running `tools/run_tests.py` on windows-latest, macos-latest and ubuntu-latest (under `xvfb-run`); `build` has `needs: [lint, test]` and `fail-fast: false`. The Windows and Linux build jobs run `test_gpu_tuner` and `test_tuner_canvas` with the freshly built wheel (runners have a software adapter or no Vulkan, so that exercises the fallback to canvas for real). After PyInstaller each build job runs the frozen binary with **`--selftest`** against an isolated `JUSTATUNER_CONFIG_DIR`. The Windows build job then installs the Inno Setup installer silently, runs the installed copy's `--selftest`, checks the Start Menu shortcut, uninstalls silently, and asserts the user's `%APPDATA%\JustATuner` folder survived. The macOS build job runs **`--tour all`** twice (light, then dark via `defaults write` + the `osascript` appearance switch + `--appearance dark`) and uploads both as the `mac-tour` artifact with `continue-on-error`. Look at those pictures after a Mac-affecting change; they are the only eyes on the Mac. First run (2026-10-06): the canvas tuner lit A4 IN TUNE on real Mac Tk, the dark run took (Tuner Settings mean brightness 129 → 43, latency dialog 107 → 43), and the pictures found the blank Aqua swatches and the clipped drone status row (see the traps). The runner has a silent input device, so the "tuner-no-mic" stop shows a running tuner there; the no-mic error itself is gated in `test_tuner_canvas` pass 0. Blind spots no runner reaches: the mic permission prompt itself, Retina scaling, display scaling above 100 % on Windows, real audio devices, Gatekeeper's first launch.
-
-## Config File Location
-
-User settings live in `app_settings.json` at:
-
-| Platform | Location |
-|----------|----------|
-| Windows | `%APPDATA%\JustATuner\` |
-| macOS | `~/Library/Application Support/JustATuner/` |
-| Linux | `$XDG_CONFIG_HOME/JustATuner/` (or `~/.config/JustATuner/`) |
-
-Schema lives in `config.py`'s `DEFAULT_SETTINGS`. Anything read at runtime MUST exist in `DEFAULT_SETTINGS` — the merge in `load_settings` only preserves keys that already appear in the defaults, so runtime-only keys silently disappear on next launch.
-
-Top-level keys: `tuner_settings` (dict), `exerciser_settings` (dict), `audio_input_device` (int or None — cached PortAudio index), `audio_input_device_name` (str or None — the real persisted choice, see Input device by name), `active_tab` (str — "tuner" or "exerciser").
-
 ## Per-Platform Constraints
 
 - **Apple Silicon only on macOS** — `sounddevice`'s Intel wheel doesn't reliably bundle PortAudio. JustATuner is audio-only, so an Intel build with no audio isn't worth shipping. README points Intel Mac users at `brew install portaudio` + From-Source.
@@ -439,3 +192,17 @@ JustATuner started as a "what if the SSC tuner was its own free app for musician
 The JI Drone half was the original JustATone Python prototype (still in `C:\code\justatone` as legacy files alongside the now-current Rust/bevy garden visualizer). Brought over wholesale and adapted: `AudioEngine`, `intervals.py`, `pitch.py`, `widgets.py` are essentially unchanged from the prototype; `view.py` is rebuilt as an embeddable Frame.
 
 The garden visualizer in this app is a fresh take on the garden vision from the JustATone Rust pivot — done in Tk + PIL instead of bevy + wgpu. Different stack, same spirit.
+
+## Companion files
+
+The detail lives beside this file, split by subject so each stays short. Edit the companion in the same commit as the code it describes; the traps ledger above stays here.
+
+- **CLAUDE-tuner.md** — the strobe tuner engine (FFT, the Hann estimator, phase tracking, stream health, the synthetic source)
+- **CLAUDE-drone.md** — the drone engine (synth, samples, recording, drone-bleed cancellation, the room table, progressions), the visualizer modes, the garden
+- **CLAUDE-testing.md** — the twelve suites and their rules, `--selftest`, `--tour`, smoke-test patterns
+- **CLAUDE-build.md** — PyInstaller and macOS signing, the release process, CI, the config folder
+
+@CLAUDE-tuner.md
+@CLAUDE-drone.md
+@CLAUDE-testing.md
+@CLAUDE-build.md
