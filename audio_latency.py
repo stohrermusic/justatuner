@@ -24,10 +24,9 @@ import time
 
 import numpy as np
 
-try:
-    import sounddevice as sd
-except ImportError:  # pragma: no cover - the app degrades without audio
-    sd = None
+from audio_utils import import_sounddevice, sounddevice_error
+
+sd = import_sounddevice()   # None with no audio, for any reason; the app degrades
 
 _log = logging.getLogger(__name__)
 
@@ -139,7 +138,8 @@ def measure(input_device=None, output_device=None):
     time; call from a worker thread. Returns a LatencyResult."""
     res = LatencyResult()
     if sd is None:
-        res.message = "sounddevice is not installed."
+        reason = sounddevice_error()
+        res.message = f"No audio: {reason}." if reason else "sounddevice is not installed."
         return res
 
     if output_device is None:

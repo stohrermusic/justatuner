@@ -163,8 +163,11 @@ SECTIONS = [
         "Only one tab uses the microphone at a time. Switching tabs "
         "hands the mic from one engine to the other.",
         "",
-        "Input device: pick a specific mic from the Input menu in "
-        "either tab.",
+        "Input device: pick a specific mic in Tuner > Settings, or in "
+        "Exerciser Options > Input on the drone tab. Plugged a mic in "
+        "after starting the app? Tuner Settings looks for it each time "
+        "it opens; on the drone tab choose Input > Refresh Devices (the "
+        "drone pauses for a moment while it looks).",
         "",
         "Speakers or headphones (Exerciser Options > Monitoring): with "
         "speakers, the drone leaks into the mic, so whenever the drone "

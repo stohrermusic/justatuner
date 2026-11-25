@@ -14,6 +14,7 @@ import functools
 import logging
 import sys
 
+from audio_utils import pitch_or_default, sounddevice_error
 from status_lamp import StatusLamp
 
 _log = logging.getLogger(__name__)
@@ -68,7 +69,71 @@ WHEEL_BG = "#0D0D0D"
 DIM_MULTIPLIER = 0.08     # Inactive wheel brightness
 LABEL_COLOR = "#888888"
 LABEL_ACTIVE_COLOR = "#FFFFFF"
-FRAME_RATES = {"60": 16, "90": 11, "120": 8}
+FRAME_RATES = {"60": 60.0, "90": 90.0, "120": 120.0}     # FPS setting -> frames per second
+
+
+class FramePacer:
+    """Paces an `after()` loop against a clock, so "60" is sixty frames a second.
+
+    The loop used to ask Tk for a fixed 16 ms after each frame's work. That
+    adds the work to every period, and on Windows the wait itself is rounded
+    up to the system timer tick (15.6 ms unless raised, see fine_timer), so
+    4 ms of work + after(16) was 31 ms: 32 fps on the 60 setting, measured
+    2026-11-25 (63 on the 120 setting, which is why SSC, set to 120, looked
+    twice as fast). At 32 fps the fine outer rings step more than half a
+    stripe per frame from about 8 cents off and appear to run backwards.
+
+    Call next_delay_ms once the frame's work AND its redraws are done (the
+    view calls it from an idle callback): it returns how long to wait for
+    the next frame's start on a fixed timeline, one period after the last
+    start. A frame that overran its period is followed at once, and the
+    timeline restarts from there: no debt is carried, so there is never a
+    burst of catch-up frames, and a loop that cannot keep up simply runs
+    back to back. The wait is never under 1 ms, so Tk reaches its idle work
+    (the redraws) before the next frame is due.
+    """
+
+    def __init__(self):
+        self._deadline = None
+
+    def reset(self):
+        self._deadline = None
+
+    def next_delay_ms(self, period_s, now=None):
+        if now is None:
+            import time
+            now = time.perf_counter()
+        if self._deadline is None:
+            self._deadline = now
+        self._deadline = max(self._deadline + period_s, now)
+        return max(1, int(round((self._deadline - now) * 1000.0)))
+
+
+_fine_timer_holds = 0
+
+
+def fine_timer(on):
+    """Windows: hold (True) or release (False) a 1 ms system timer tick for
+    this process. The default tick is 15.6 ms and every Tk `after()` is
+    rounded up to it, so no frame rate between 32 and 64 fps is reachable
+    without this. Held only while the tuner runs (a fine tick costs a little
+    power); calls nest. Elsewhere timers are already fine: a no-op.
+    Returns whether a hold is in effect."""
+    global _fine_timer_holds
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes
+        winmm = ctypes.windll.winmm
+        if on:
+            if winmm.timeBeginPeriod(1) == 0:      # TIMERR_NOERROR
+                _fine_timer_holds += 1
+        elif _fine_timer_holds > 0:
+            winmm.timeEndPeriod(1)
+            _fine_timer_holds -= 1
+    except (OSError, AttributeError) as e:
+        _log.warning("Could not set the timer resolution: %s", e)
+    return _fine_timer_holds > 0
 
 # Ring segment counts (7 rings, doubling — matches patent)
 RING_SEGMENTS = [4, 8, 16, 32, 64, 128, 256]
@@ -183,6 +248,29 @@ def _annular_sector_points(cx, cy, r_inner, r_outer, angle_start, angle_end, ste
         points.append(cx + r_inner * math.cos(rad))
         points.append(cy - r_inner * math.sin(rad))
     return points
+
+
+# The wheels of the bottom row (the naturals, _tuner_compute_layout): their
+# window is a wedge that opens DOWNWARD, onto the bottom of the disc.
+BOTTOM_ROW_PITCH_CLASSES = frozenset({0, 2, 4, 5, 7, 9, 11})
+
+
+def window_phases(pitch_class, phases):
+    """A wheel's phases as its window needs them, so that a sharp note drifts
+    RIGHT in every window and a flat one left.
+
+    The engine raises a wheel's phase for a sharp note, and both renderers
+    turn a disc CLOCKWISE for a rising phase (the shader's `angle - phase`
+    with its angle clockwise from the top; StrobeWheel.update). Seen through
+    a wedge that opens upward (the top row) a clockwise disc carries its
+    stripes right; through one that opens downward (the bottom row) the same
+    turn carries them left, so the seven naturals read backwards (Matt in
+    SSC, 2026-11-12: "the wheels on the tuner on the bottom row are moving
+    in the wrong direction"; so since the tuner shipped). A bottom-row disc
+    is turned the other way instead. One place, before either renderer."""
+    if pitch_class in BOTTOM_ROW_PITCH_CLASSES:
+        return [-p for p in phases]
+    return phases
 
 
 class StrobeWheel:
@@ -327,6 +415,12 @@ class StrobeWheel:
             ring_phase_offsets: Optional list of per-ring phase offsets in degrees.
                 Each ring tracks its own octave's frequency independently.
                 If None, all rings use phase_offset.
+                A rising phase turns the disc CLOCKWISE on screen, as the
+                GPU shader does. Until 2026-11-25 this renderer turned it
+                counter-clockwise (canvas angles count that way), so the
+                canvas and the GPU drifted opposite ways for the same note
+                (measured from screen pixels: +3 deg of phase turned the
+                GPU picture +3.1 deg clockwise and the canvas one -3.1).
             ring_brightness_pct: 0-100, how much per-ring effect to apply
                 (0=uniform brightness, 100=full per-ring independent brightness)
             overall_brightness_pct: 0-100, scales the overall brightness ceiling
@@ -393,7 +487,8 @@ class StrobeWheel:
             ring_phase = ring_phases[ring_idx]
             r_inner, r_outer = self._ring_radii[ring_idx]
             for poly_id, base_start, seg_span, steps in self._segments[ring_idx]:
-                start = (base_start + ring_phase) % 360.0
+                turned = base_start - ring_phase      # canvas angles count counter-clockwise
+                start = turned % 360.0
                 end = start + seg_span
                 if not (end > vis_lo and start < vis_hi):
                     if not (end + 360.0 > vis_lo and start < vis_hi) and \
@@ -402,8 +497,7 @@ class StrobeWheel:
 
                 points = _annular_sector_points(
                     self.cx, self.cy, r_inner, r_outer,
-                    base_start + ring_phase,
-                    base_start + ring_phase + seg_span, steps
+                    turned, turned + seg_span, steps
                 )
                 self.canvas.coords(poly_id, *points)
 
@@ -467,6 +561,8 @@ class TunerView:
         self._tuner_player = None
         self._tuner_wheels = []
         self._tuner_running = False
+        self._tuner_pacer = FramePacer()
+        self._tuner_fine_timer = False   # this view holds a fine_timer(True)
         self._tuner_anim_id = None
         self._tuner_fps_times = []      # Timestamps for FPS measurement
         self._tuner_fps_display = None  # Canvas text id for FPS overlay
@@ -657,7 +753,7 @@ class TunerView:
         pitch_sliders = _make_slider_group(left_third, 1, _("PITCH"), padx=(0, 14))
 
         self._tuner_pitch_var = tk.DoubleVar(
-            value=tuner_settings.get("reference_pitch", 440.0))
+            value=pitch_or_default(tuner_settings.get("reference_pitch", 440.0)))
         _make_vslider(pitch_sliders, _("A ="), self._tuner_pitch_var, 420, 460, 0,
                       cmd=lambda v: self._tuner_on_pitch_changed(),
                       resolution=1, value_fmt=lambda v: f"{v:.0f} Hz")
@@ -827,7 +923,7 @@ class TunerView:
         # Apply saved settings
         try:
             self._tuner_engine.set_reference_pitch(float(self._tuner_pitch_var.get()))
-        except ValueError:
+        except (ValueError, tk.TclError):   # a DoubleVar holding a non-number raises TclError on get()
             pass
         self._tuner_engine.set_sensitivity(self._tuner_sens_var.get())
 
@@ -859,8 +955,11 @@ class TunerView:
             msg = _("The Stroboscopic Tuner is not available on this system.\n\n"
                     "If you see this on Windows, try reinstalling the app.\n\n"
                     "All other features work normally.")
+        reason = sounddevice_error()
+        if reason:
+            msg += "\n\n" + _("Reason: {reason}").format(reason=reason)
         tk.Label(frame, text=msg, bg=bg, fg="#AAAAAA",
-                 font=("Helvetica", 12), justify="center").pack(expand=True)
+                 font=("Helvetica", 12), justify="center", wraplength=700).pack(expand=True)
 
     # ------------------------------------------------------------------
     # WHEEL CREATION & LAYOUT
@@ -1356,7 +1455,7 @@ class TunerView:
             if self._tuner_engine:
                 self._tuner_engine.set_reference_pitch(hz)
                 self._tuner_ref_notes = _build_ref_notes(hz)
-        except ValueError:
+        except (ValueError, tk.TclError):
             pass
 
     def _tuner_on_sensitivity_changed(self, value=None):
@@ -1388,6 +1487,11 @@ class TunerView:
         # --- Input device ---
         from config import (get_input_devices, resolve_input_device,
                             remember_input_device)
+        if sys.platform != 'linux':
+            # PortAudio lists devices once, when it starts: a microphone
+            # plugged in since then is found only by a rescan (the host stops
+            # and restarts the audio round it). Linux shows no picker.
+            self._tuner_rescan_devices()
         devices = get_input_devices()
         if devices:
             mic_row = tk.Frame(frame, bg=bg)
@@ -1436,13 +1540,16 @@ class TunerView:
                     sel = mic_combo.current()
                     dev_idx = dev_indices[sel] if sel >= 0 else None
                     remember_input_device(self.settings, dev_idx)
-                    # Restart engine with new device
-                    if self._tuner_engine and self._tuner_engine.is_running:
+                    # Restart on the new device through _tuner_start, which
+                    # looks the device up by name, checks that it opened and
+                    # shows the error when it did not (a raw engine.start()
+                    # failure left frozen wheels with the pilot lit; SSC,
+                    # 2026-06-09). Also when the tuner had failed to start:
+                    # the device just picked may be the first that works.
+                    if self._tuner_engine and (self._tuner_engine.is_running
+                                               or self._tuner_error_state):
                         self._tuner_stop()
-                        self._tuner_engine.start(device=dev_idx)
-                        self._tuner_running = True
-                        self._tuner_set_pilot(True)
-                        self._tuner_animate()
+                        self._tuner_start()
 
                 mic_combo.bind("<<ComboboxSelected>>", on_mic_changed)
 
@@ -1540,6 +1647,14 @@ class TunerView:
     # ANIMATION LOOP
     # ------------------------------------------------------------------
 
+    def _tuner_rescan_devices(self):
+        """Have the host look for audio devices again (JustATunerApp sets
+        `rescan_devices`; it stops and restarts the audio round the rescan).
+        Without a host the list stays as PortAudio first saw it."""
+        hook = getattr(self, "rescan_devices", None)
+        if hook is not None:
+            hook()
+
     def _tuner_start(self):
         """Start the tuner (audio capture + animation)."""
         if not self._tuner_engine:
@@ -1570,9 +1685,20 @@ class TunerView:
 
         self._tuner_error_state = None
         self._tuner_running = True
+        self._tuner_pacer.reset()
+        self._tuner_hold_fine_timer(True)
         self._tuner_set_pilot(True)
         self._tuner_update_mic_label()
         self._tuner_animate()
+
+    def _tuner_hold_fine_timer(self, on):
+        """Hold the 1 ms timer tick while the frame loop runs, and give it
+        back the moment it stops (every path that clears _tuner_running)."""
+        if on and not self._tuner_fine_timer:
+            self._tuner_fine_timer = fine_timer(True)
+        elif not on and self._tuner_fine_timer:
+            fine_timer(False)
+            self._tuner_fine_timer = False
 
     def _tuner_draw_audio_error(self):
         """Draw the 'Audio error' message on the canvas (tag "error")."""
@@ -1610,6 +1736,7 @@ class TunerView:
     def _tuner_stop(self):
         """Stop the tuner (audio + animation)."""
         self._tuner_running = False
+        self._tuner_hold_fine_timer(False)
         self._tuner_set_pilot(False)
         if self._tuner_anim_id is not None:
             try:
@@ -1676,7 +1803,7 @@ class TunerView:
                 for i in range(12):
                     if magnitudes[i] > MAGNITUDE_THRESHOLD:
                         spin_mags.append(magnitudes[i])
-                        ring_phases.append(list(result.ring_phase_offsets[i]))
+                        ring_phases.append(window_phases(i, list(result.ring_phase_offsets[i])))
                     else:
                         spin_mags.append(0.0)
                         ring_phases.append([0.0] * NUM_RINGS)
@@ -1718,8 +1845,8 @@ class TunerView:
                     ring_mags = [min(1.0, rm * gain)
                                  for rm in result.ring_magnitudes[i]]
                     if mag > MAGNITUDE_THRESHOLD:
-                        phase = result.phase_offsets[i]
-                        rp = list(result.ring_phase_offsets[i])
+                        phase = window_phases(i, [result.phase_offsets[i]])[0]
+                        rp = window_phases(i, list(result.ring_phase_offsets[i]))
                     else:
                         phase = 0.0
                         mag = 0.0
@@ -1805,9 +1932,26 @@ class TunerView:
                 self._tuner_update_fps_display("")
                 self._tuner_fps_last_update = 0.0
 
-        interval = FRAME_RATES.get(self._tuner_fps_var.get(), 16)
+        # The next frame is armed from an idle callback, i.e. after Tk has run
+        # this frame's redraws, and the wait is worked out then, so it covers
+        # the redraw as well as the work. Arming it here with a short wait let
+        # the timer come due first on the canvas path, whose redraw is long:
+        # frames started before the picture had been drawn (the gate in
+        # test_tuner_canvas caught it, 2026-11-25).
         try:
-            self._tuner_anim_id = self.root.after(interval, self._tuner_animate)
+            self._tuner_anim_id = self.root.after_idle(self._tuner_arm_next_frame)
+        except tk.TclError:
+            pass  # Root window destroyed during shutdown
+
+    def _tuner_arm_next_frame(self):
+        """Idle callback: schedule the next frame on the pacer's timeline."""
+        if not self._tuner_running:
+            self._tuner_anim_id = None
+            return
+        fps = FRAME_RATES.get(self._tuner_fps_var.get(), 60.0)
+        delay = self._tuner_pacer.next_delay_ms(1.0 / fps)
+        try:
+            self._tuner_anim_id = self.root.after(delay, self._tuner_animate)
         except tk.TclError:
             pass  # Root window destroyed during shutdown
 
@@ -1912,6 +2056,7 @@ class TunerView:
         """Show audio stream error with a retry option."""
         self._tuner_error_state = ("stream", error_msg)
         self._tuner_running = False
+        self._tuner_hold_fine_timer(False)
         self._tuner_set_pilot(False)
         self._tuner_update_mic_label()
         if self._tuner_use_gpu and hasattr(self, '_tuner_error_lbl'):

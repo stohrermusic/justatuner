@@ -66,6 +66,19 @@ def _run(app, seconds):
     app.root.mainloop()
 
 
+def _invoke_menu(menu, label):
+    """Invoke the command with this label anywhere under a menu; False if absent."""
+    end = menu.index("end")
+    for i in range((end if end is not None else -1) + 1):
+        kind = menu.type(i)
+        if kind == "command" and menu.entrycget(i, "label") == label:
+            menu.invoke(i)
+            return True
+        if kind == "cascade" and _invoke_menu(menu.nametowidget(menu.entrycget(i, "menu")), label):
+            return True
+    return False
+
+
 def main():
     try:
         probe = tk.Tk()
@@ -181,6 +194,12 @@ def main():
     ex._prog_start()
     _run(app, 0.2)
     check("manual: playing at once on C", lambda: ex._player.state == "playing" and ex.root_note == 0)
+    # A generated key goes to the window that holds the keyboard focus. Run
+    # straight after another suite's window closed, this one had not been
+    # given it and the key went nowhere (4 checks failed, 2 runs of 2 after
+    # test_tour, 2026-11-25): take the focus first.
+    ex.root.focus_force()
+    _run(app, 0.1)
     ex.root.event_generate("<KeyPress-space>")
     _run(app, 0.2)
     check("manual: the space key advances to F", lambda: ex.root_note == 5)
@@ -200,6 +219,37 @@ def main():
     check("save_settings keeps the progression and the key",
           lambda: app.settings["exerciser_settings"]["progression"]["name"] == "manual"
           and app.settings["exerciser_settings"]["advance_key"] == "space")
+
+    # ---- Refresh Devices: PortAudio lists devices once, when it starts ----
+    # The rescan is the test's own (no suite re-initialises the real
+    # PortAudio); it records what was running at that instant.
+    import config
+    import exerciser.view as ev
+    rescans = []
+    listed = {"devices": [(1, "Built-in Microphone")]}
+
+    def fake_rescan():
+        rescans.append((ex._running, ex.engine.running))
+        listed["devices"] = [(1, "USB Microphone (plugged in late)"), (2, "Built-in Microphone")]
+        return True
+    config.rescan_input_devices = fake_rescan
+    config.get_input_devices = ev.get_input_devices = lambda: list(listed["devices"])
+    app.settings["audio_input_device"], app.settings["audio_input_device_name"] = 1, "Built-in Microphone"
+    check("Exerciser Options > Input has a Refresh Devices entry",
+          lambda: _invoke_menu(app._menubar, "Refresh Devices"))
+    _run(app, 0.3)
+    check(f"Refresh Devices looks for devices again, once, with the drone tab's streams closed ({rescans})",
+          lambda: rescans == [(False, False)])
+    check("the drone tab is running again afterwards", lambda: ex._running and ex.engine.running)
+
+    def late_microphone_listed():
+        m = ex._device_menu
+        labels = [m.entrycget(i, "label") for i in range(m.index("end") + 1) if m.type(i) == "radiobutton"]
+        assert "USB Microphone (plugged in late)" in labels, labels
+    check("a microphone plugged in after launch is in the Input Device menu", late_microphone_listed)
+    check("the saved microphone is found by name at its new index (1 -> 2), not the device now at 1",
+          lambda: ex.engine._input_device == 2 and ex.input_device.get() == "Built-in Microphone")
+    app.settings["audio_input_device"] = app.settings["audio_input_device_name"] = None
 
     # Switching back to the tuner stops the drone.
     app.notebook.select(app.tuner_frame)

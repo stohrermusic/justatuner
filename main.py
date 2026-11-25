@@ -32,6 +32,7 @@ from config import (  # noqa: E402
     APP_NAME, APP_VERSION, load_settings, save_settings,
     setup_logging, get_log_file,
 )
+from audio_utils import sounddevice_error  # noqa: E402
 from tuner.view import TunerView  # noqa: E402
 from exerciser.view import ExerciserView  # noqa: E402
 from user_guide import open_user_guide  # noqa: E402
@@ -86,6 +87,16 @@ class JustATunerApp:
         self.notebook.add(self.exerciser_frame, text="Just Intonation Drone")
         self.exerciser = ExerciserView(self.exerciser_frame, self.root,
                                        self.settings)
+        # Both tabs' device lists ask the app to look for devices again: a
+        # rescan needs every stream closed, and only the app knows them all.
+        self.tuner.rescan_devices = self._rescan_audio_devices
+        self.exerciser.rescan_devices = self._rescan_audio_devices
+        self._latency_busy = False
+
+        # The engines are imported before logging is set up, so a sound
+        # system that would not start is reported here, once.
+        if sounddevice_error():
+            logging.warning("Audio unavailable: %s", sounddevice_error())
 
         # Menu bar — populated per-tab in _on_tab_changed
         self._menubar = tk.Menu(self.root)
@@ -164,6 +175,33 @@ class JustATunerApp:
         # Rebuild the menubar for the active tab. Both views expose a
         # populate_menu(menubar) when they have menus to contribute.
         self._rebuild_menubar(is_tuner)
+
+    def _rescan_audio_devices(self):
+        """Look for audio devices again (config.rescan_input_devices), with
+        whichever tab is running stopped round it and started again after.
+
+        A rescan invalidates every open stream and may move every device
+        index; the tabs come back on the chosen device by its name. Never
+        while the latency test is measuring or a sample is being recorded,
+        which would lose their stream: False then, and the old list stands.
+        """
+        import config
+        engine = getattr(self.exerciser, "engine", None)
+        if self._latency_busy or getattr(engine, "_recording", False):
+            return False
+        tuner_on = bool(getattr(self.tuner, "_tuner_running", False))
+        drone_on = bool(getattr(self.exerciser, "_running", False))
+        # Both stops run even when a tab is idle: the tuner's reference tone
+        # has its own output stream.
+        self.tuner.stop()
+        self.exerciser.stop()
+        try:
+            return config.rescan_input_devices()
+        finally:
+            if tuner_on:
+                self.tuner.start()
+            if drone_on:
+                self.exerciser.start()
 
     def _rebuild_menubar(self, is_tuner):
         # Wipe the existing cascades. Tk doesn't have a clean "remove
@@ -298,11 +336,13 @@ class JustATunerApp:
                 self.root.after(100, poll)
                 return
             state["thread"] = None
+            self._latency_busy = False
             finish()
 
         def run():
             run_btn.configure(state="disabled")
             result_var.set("Listening\u2026")
+            self._latency_busy = True       # no device rescan under the measurement's stream
             self.tuner.stop()
             self.exerciser.stop()
             in_dev = resolve_input_device(self.settings)

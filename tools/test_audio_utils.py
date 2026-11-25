@@ -351,6 +351,69 @@ test(f"after stop() it is 0.0 (got {eng.silent_seconds()})", eng.silent_seconds(
 
 
 # ============================================
+# sounddevice starts PortAudio when it is imported. On a machine whose sound
+# system will not start, that import raises sounddevice.PortAudioError, which
+# is neither an ImportError nor an OSError; it went through every module that
+# imports an engine and ended the app at launch (SSC's Linux CI runner,
+# 2026-11-12; here 2026-11-25). A child interpreter with a sounddevice that
+# raises at import: every module imports, with no audio and the reason kept.
+print("\n--- 9. the audio library fails to start ---")
+import subprocess  # noqa: E402
+
+_child = r'''
+import importlib.abc, importlib.machinery, sys
+sys.path.insert(0, %r)
+
+class Boom(importlib.abc.MetaPathFinder, importlib.abc.Loader):
+    def find_spec(self, name, path, target=None):
+        if name == "sounddevice":
+            return importlib.machinery.ModuleSpec(name, self)
+    def create_module(self, spec):
+        return None
+    def exec_module(self, module):
+        class PortAudioError(Exception):
+            pass
+        raise PortAudioError("Error initializing PortAudio: Unanticipated host error")
+
+sys.meta_path.insert(0, Boom())
+for name in ("tuner.engine", "exerciser.engine", "audio_latency"):
+    try:
+        m = __import__(name, fromlist=["x"])
+        print(name, "imported", m.sd is None)
+    except BaseException as e:
+        print(name, "RAISED", type(e).__name__)
+import audio_utils, tuner.engine, audio_latency
+print("available", tuner.engine.AUDIO_AVAILABLE)
+print("reason", getattr(audio_utils, "sounddevice_error", lambda: None)())
+print("latency", audio_latency.measure().message)
+''' % os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_p = subprocess.run([sys.executable, "-c", _child], capture_output=True, text=True)
+_out = _p.stdout.splitlines()
+for _name in ("tuner.engine", "exerciser.engine", "audio_latency"):
+    test(f"{_name} imports with no audio when PortAudio will not start "
+         f"({next((ln for ln in _out if ln.startswith(_name)), _p.stderr.strip()[-100:])})",
+         f"{_name} imported True" in _out)
+test("AUDIO_AVAILABLE is False", "available False" in _out)
+_reason = next((ln for ln in _out if ln.startswith("reason ")), "")
+test(f"the reason is kept for the log and the user ({_reason})", "Error initializing PortAudio" in _reason)
+_lat = next((ln for ln in _out if ln.startswith("latency ")), "")
+test(f"the latency test says why it cannot run ({_lat})", "Error initializing PortAudio" in _lat)
+
+
+# ============================================
+# A reference pitch that is not a number (a hand-edited settings file) went
+# into a tk.DoubleVar, whose get() raises TclError, not ValueError.
+print("\n--- 10. pitch_or_default ---")
+import audio_utils as _au  # noqa: E402
+
+_pod = getattr(_au, "pitch_or_default", lambda v, default=440.0: v)
+test("pitch_or_default: numbers pass through as floats",
+     _pod(442) == 442.0 and _pod("441.5") == 441.5 and isinstance(_pod(442), float))
+test("pitch_or_default: 'abc', None, a list, nan and inf give 440.0",
+     all(_pod(v) == 440.0 for v in ("abc", None, [1], float("nan"), float("inf"))))
+
+
+# ============================================
 print(f"\n{'=' * 50}")
 print(f"Results: {passed} passed, {failed} failed out of {passed + failed}")
 if failed:

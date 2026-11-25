@@ -87,8 +87,22 @@ def main():
     print("Tour as a gate, and the dialogs")
     print("=" * 60)
     from main import JustATunerApp, run_tour
+    import config
+
+    # No suite re-initialises the real PortAudio: the rescan is recorded, with
+    # what was running at that instant, and the device list is the test's own.
+    rescans = []
+    listed = {"devices": [(1, "Built-in Microphone")]}
+    config.get_input_devices = lambda: list(listed["devices"])
 
     app = JustATunerApp(autostart=False)
+
+    def fake_rescan():
+        rescans.append((app.tuner._tuner_running, bool(app.tuner._tuner_engine.is_running),
+                        app.exerciser._running))
+        listed["devices"] = [(1, "USB Microphone (plugged in late)"), (2, "Built-in Microphone")]
+        return True
+    config.rescan_input_devices = fake_rescan
     app.root.state("normal")
     app.root.geometry("1000x720+0+0")
     tk_errors = []
@@ -116,6 +130,8 @@ def main():
     app.tuner._tuner_engine.synthetic_hz = 440.0
     app._on_tab_changed()
     _run(app, 0.5)
+    del rescans[:]
+    listed["devices"] = [(1, "Built-in Microphone")]
     app.tuner._tuner_open_settings()
     _run(app, 0.3)
     dlg = [w for w in _toplevels(app.root) if w.title() == "Tuner Settings"]
@@ -124,6 +140,24 @@ def main():
         combos = _widgets(dlg[0], "TCombobox")
         check("input-device box reads 'System Default' (StringVar kept alive)",
               lambda: combos and combos[0].get() == "System Default")
+        if sys.platform != "linux":                 # Linux shows no picker: the system default only
+            check(f"opening Settings looks for devices again, once, with the tuner stopped round it ({rescans})",
+                  lambda: rescans == [(False, False, False)])
+            check("the tuner is running again afterwards",
+                  lambda: app.tuner._tuner_running and app.tuner._tuner_engine.is_running)
+            check("a microphone plugged in after launch is in the list",
+                  lambda: "USB Microphone (plugged in late)" in combos[0].cget("values"))
+
+            def pick_the_late_microphone():
+                combos[0].current(1)
+                combos[0].event_generate("<<ComboboxSelected>>")
+                _run(app, 0.3)
+                assert app.settings["audio_input_device_name"] == "USB Microphone (plugged in late)", \
+                    app.settings["audio_input_device_name"]
+                assert app.tuner._tuner_running and app.tuner._tuner_engine._last_device == 1, \
+                    (app.tuner._tuner_running, app.tuner._tuner_engine._last_device)
+            check("picking it saves it by name and restarts the tuner on it", pick_the_late_microphone)
+            app.settings["audio_input_device"] = app.settings["audio_input_device_name"] = None
         check("dialog opened over the app, not at the screen corner",
               lambda: dlg[0].winfo_rootx() >= app.root.winfo_rootx() and dlg[0].winfo_rooty() >= app.root.winfo_rooty())
         checks = _widgets(dlg[0], "Checkbutton")

@@ -9,13 +9,13 @@ import time
 import wave
 import numpy as np
 
-try:
-    import sounddevice as sd
-except ImportError:
-    sd = None
-
-from audio_utils import open_input_stream, open_output_stream, synthetic_tone
+from audio_utils import (import_sounddevice, open_input_stream, open_output_stream,
+                         sounddevice_error, synthetic_tone)
 from exerciser.pitch import yin_detect, moving_median_filter
+
+# None when there is no audio on this machine, for any reason (the package,
+# the PortAudio library, or a sound system that will not start).
+sd = import_sounddevice()
 
 _log = logging.getLogger(__name__)
 
@@ -232,7 +232,7 @@ class AudioEngine:
         """Start audio streams."""
         if sd is None:
             raise RuntimeError(
-                "sounddevice not installed. Run: pip install sounddevice"
+                "No audio: " + (sounddevice_error() or "the sounddevice package is not installed")
             )
         self.running = True
         self._start_input_stream()

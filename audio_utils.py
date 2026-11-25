@@ -9,6 +9,7 @@ Requires: numpy, threading (stdlib)
 """
 
 import logging
+import math
 import threading
 
 try:
@@ -217,3 +218,50 @@ def open_input_stream(sd, device, preferred_rate, **kwargs):
 def open_output_stream(sd, device, preferred_rate, **kwargs):
     """sd.OutputStream(...) with sample-rate fallback. Returns (stream, rate)."""
     return _open_with_fallback(sd, "output", device, preferred_rate, **kwargs)
+
+
+_SOUNDDEVICE_ERROR = None
+
+
+def import_sounddevice():
+    """The sounddevice module, or None when there is no audio on this machine.
+
+    One place for both engines and the latency test. sounddevice starts
+    PortAudio when it is imported, so three different things can go wrong:
+    the package is absent (ImportError), the PortAudio library is absent
+    (OSError), or the sound system will not start, which raises
+    sounddevice.PortAudioError (it cannot be named: the import is what
+    failed). The last went through every module that imports an engine and
+    ended the app at launch (SSC's Linux CI runner, 2026-11-12). Any failure
+    is "no audio", and the reason is kept (sounddevice_error) because this
+    runs before logging is set up: main.py logs it and both tabs show it.
+    """
+    global _SOUNDDEVICE_ERROR
+    try:
+        import sounddevice
+    except ImportError:
+        _SOUNDDEVICE_ERROR = "the sounddevice package is not installed"
+        return None
+    except Exception as e:  # noqa: BLE001 — see the docstring: nothing narrower can be named
+        _SOUNDDEVICE_ERROR = f"the audio system did not start ({type(e).__name__}: {e})"
+        return None
+    _SOUNDDEVICE_ERROR = None
+    return sounddevice
+
+
+def sounddevice_error():
+    """Why there is no audio (a sentence fragment), or None when there is."""
+    return _SOUNDDEVICE_ERROR
+
+
+def pitch_or_default(value, default=440.0):
+    """A reference pitch from settings as a float, or the default when the
+    stored value is not a finite number. A hand-edited "abc" went into a
+    tk.DoubleVar; the A= slider then put its own bottom end there, and the
+    tuner ran at A = 420 with nothing said (measured 2026-11-25; in SSC the
+    same value stopped the tab building, 2026-11-10)."""
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return default
+    return value if math.isfinite(value) else default

@@ -242,6 +242,9 @@ class ExerciserView:
         if self._running:
             return
         self._running = True
+        # By name every time, as the tuner tab does: after a device rescan
+        # the saved index may belong to another device.
+        self._sync_input_device()
         try:
             self.engine.start()
         except RuntimeError as e:
@@ -369,7 +372,7 @@ class ExerciserView:
         input_menu.add_cascade(label="Input Device", menu=self._device_menu)
         self._refresh_device_menu()
         input_menu.add_command(
-            label="Refresh Devices", command=self._refresh_device_menu,
+            label="Refresh Devices", command=self._on_refresh_devices,
         )
 
         # Speakers: the drone leaks into the mic, so the engine listens to
@@ -1072,6 +1075,27 @@ class ExerciserView:
                 if idx == device_index:
                     self.input_device.set(name)
                     break
+
+    def _sync_input_device(self):
+        """Point the engine and the menu's radio mark at the saved device,
+        found by name (config.resolve_input_device). Only while the engine
+        is stopped: set_input_device would reopen a running stream."""
+        idx = resolve_input_device(self.settings)
+        if not self.engine.running and idx != self.engine._input_device:
+            self.engine.set_input_device(idx)
+        name = self.settings.get("audio_input_device_name") if idx is not None else None
+        self.input_device.set(name or "Default")
+
+    def _on_refresh_devices(self):
+        """Exerciser Options > Input > Refresh Devices. PortAudio lists
+        devices once, when it starts, so re-reading its list found nothing
+        new; the host looks again with the audio stopped round it (the drone
+        pauses, and in speakers mode the room is listened to again)."""
+        hook = getattr(self, "rescan_devices", None)
+        if hook is not None:
+            hook()
+        self._sync_input_device()
+        self._refresh_device_menu()
 
     def _refresh_device_menu(self):
         if not hasattr(self, "_device_menu"):

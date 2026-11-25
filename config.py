@@ -129,6 +129,29 @@ def get_input_devices():
         return []
 
 
+def rescan_input_devices():
+    """Have PortAudio look for audio devices again. True when it was done.
+
+    PortAudio lists devices once, when it is initialised, so a microphone
+    plugged in after the app started was never offered until a restart
+    (Matt in SSC, 2026-11-12: "my usb mic is plugged in ... but the ssc
+    (exe) shows only the built in mic").
+
+    Only with no stream open: every stream is invalid afterwards and every
+    device index may have moved. JustATunerApp._rescan_audio_devices stops
+    the audio round this call and starts it again, and the engines come
+    back on the chosen device by its name (resolve_input_device).
+    """
+    try:
+        import sounddevice as sd
+        sd._terminate()
+        sd._initialize()
+        return True
+    except Exception as e:  # noqa: BLE001 — no sounddevice, or PortAudio would not restart
+        logging.warning("Audio device rescan failed: %s", e)
+        return False
+
+
 def resolve_input_device(settings):
     """Turn the persisted device choice into a PortAudio index (or None).
 

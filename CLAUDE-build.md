@@ -62,7 +62,7 @@ Single workflow at `.github/workflows/build.yml`. Three matrix entries:
 
 - **`windows-latest`** — Python 3.11, `pip install -r requirements.txt`, `python build.py`, then Inno Setup (`choco install innosetup`) wraps `dist\JustATuner.exe` into `JustATuner-Windows-Setup-{APP_VERSION}.exe`. Only the installer is published; the bare `.exe` is not.
 - **`macos-latest`** — Apple Silicon. Same Python install, `python build.py` produces `dist/JustATuner.app`, packaged to `JustATuner-macOS.zip` with `ditto -c -k --keepParent` (preserves the bundle's internal symlinks; `zip -r` would break the code-signature seal). CI verifies the mic key and the code signature, including on an unzipped copy of the final artifact.
-- **`ubuntu-latest`** — `apt-get install libportaudio2`, then build, rename to `JustATuner-Linux`.
+- **`ubuntu-24.04`** — `apt-get install libportaudio2`, then build, rename to `JustATuner-Linux`. Pinned, never `ubuntu-latest` (2026-11-25): the binary needs the C library of the system it was built on or newer, and SSC's 3.0, built on 26.04, did not start on older systems. The job's first Linux step prints the runner's glibc and fails above 2.39. Move the pin only when GitHub retires the image, and say so in the release notes. The Linux test job stays on `ubuntu-latest`; build-job conditions say `runner.os == 'Linux'`.
 
 Before the PyInstaller step, the Windows and Linux runners install the Rust toolchain (`dtolnay/rust-toolchain@stable`) and `maturin build` the `tuner_renderer/` crate, then `pip install` the resulting `tuner_render` wheel so `build.py` bundles the GPU strobe renderer. Adds a Rust compile (~1–2 min/runner) to those builds. The macOS runner skips the Rust steps entirely — macOS is canvas-only (see Per-Platform Constraints).
 

@@ -268,6 +268,23 @@ except Exception as e:  # noqa: BLE001
     got, err = None, e
 test("query_devices raising -> [] with no exception", err is None and got == [])
 test("enumeration failure logged", any("Could not enumerate input devices" in m for m in cap.messages))
+
+# PortAudio lists devices once, when it starts: a microphone plugged in after
+# launch was never offered (SSC, Matt, 2026-11-12). A rescan terminates and
+# re-initialises it, in that order.
+print("\n--- rescan_input_devices (fake sounddevice) ---")
+calls = []
+sys.modules["sounddevice"] = types.SimpleNamespace(
+    _terminate=lambda: calls.append("terminate"), _initialize=lambda: calls.append("initialize"))
+rescan = getattr(config, "rescan_input_devices", lambda: None)
+test(f"rescan_input_devices() is True and terminates, then initialises ({calls})",
+     rescan() is True and calls == ["terminate", "initialize"])
+cap.messages.clear()
+sys.modules["sounddevice"] = types.SimpleNamespace(_terminate=boom, _initialize=boom)
+test("a rescan that fails is False, logged, and raises nothing",
+     rescan() is False and any("rescan failed" in m for m in cap.messages))
+sys.modules["sounddevice"] = None
+test("no sounddevice: False", rescan() is False)
 if real_sd is not None:
     sys.modules["sounddevice"] = real_sd
 else:

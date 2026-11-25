@@ -6,6 +6,8 @@
 
 Drone synthesizer + mic input + pitch detection in one class. Two independent rates: `in_sr` (mic; YIN, drone cancellation, Lissajous reference sine, recording) and `sr` (drone output; oscillator phase increments, sample playback rate). Input health is checked on the `get_pitch()` timer by `_check_input_health()`: if the input callback has been silent for `INPUT_STALE_S` (1.5 s) or the stream never opened, it reopens, paced by `INPUT_RETRY_S` (3 s) so an absent mic doesn't hammer PortAudio. `input_error` (None when healthy) drives the drone tab's **MIC** status line via `ExerciserView._update_mic_status`.
 
+`ExerciserView.start()` points the engine at the saved device by name every time (`_sync_input_device`), and **Exerciser Options > Input > Refresh Devices** (`_on_refresh_devices`) has the app rescan PortAudio with the streams closed, then rebuilds the menu; see Device rescan in CLAUDE.md. With no audio on the machine `engine.start()` raises `RuntimeError` carrying `audio_utils.sounddevice_error()`, which the MIC line shows.
+
 `_rebuild_oscillators` builds a per-voice list `_osc_freqs = [(freq, amp), ...]` driven by the current voicing (one of the eleven just-ratio chords in `VOICINGS`) and sound type:
 
 - **sine**: one oscillator per voice
