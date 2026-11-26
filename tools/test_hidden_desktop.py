@@ -10,7 +10,8 @@ suites passed in the open): a child started through rerun_hidden opens a real Tk
 window, and that window's title must be among the windows of its own desktop
 and absent from this process's desktop and from the user's ("Default").
 
-The decision rules (`wanted`, `where`) are checked on every platform, so this
+The decision rules (`wanted`, `where`) and the runner's summary (a passing
+suite's SKIP and INFO lines repeated) are checked on every platform, so this
 suite never skips itself. The desktop checks run on Windows only, CI included:
 they call rerun_hidden directly, which does not look at GITHUB_ACTIONS.
 
@@ -38,6 +39,7 @@ if os.environ.get(PROBE_ENV):
     with open(os.environ[PROBE_ENV], "w", encoding="utf-8") as _f:
         json.dump({"desktop": hd.current_desktop_name(), "flag": os.environ.get(hd.ENV_FLAG, "")}, _f)
     print("  SKIP  probe: a planted check that did not run")
+    print("  INFO  probe: a planted number, 12.3 fps " + "(padding) " * 20 + "END-OF-LINE")
     print("ALL TESTS PASSED (probe: wrote the desktop name)")
     sys.exit(0)
 
@@ -302,18 +304,63 @@ sys.exit(7)
     check("--visible and JUSTATUNER_VISIBLE=1 keep the suite on the desktop the runner was started from",
           stays_visible)
 
-    def inner_skip_reported():
-        # A passing suite that left a check out says so on a "SKIP" line; the runner's
-        # one line per suite would hide it (on a private desktop the GPU picture check
-        # cannot grab the screen), so the runner repeats those lines at the end.
-        _, out = run_runner([])
-        assert "left out inside suites that passed" in out, out[-400:]
-        assert "test_hidden_desktop: SKIP  probe: a planted check that did not run" in out, out[-400:]
-
-    check("a check a passing suite left out (a SKIP line) is repeated in the runner's summary", inner_skip_reported)
-
     import shutil
     shutil.rmtree(tmp, ignore_errors=True)
+
+# --------------------------------------------------------------------------
+# The runner's summary, on every platform
+# --------------------------------------------------------------------------
+print("\ntools/run_tests.py repeats what one line per passing suite hides")
+
+
+def runner_output():
+    """`run_tests.py hidden_desktop` with this file as the probe: it passes, having
+    printed one planted SKIP line and one planted INFO line. --visible, so this
+    needs no desktop and reads the same on every platform."""
+    tmp2 = tempfile.mkdtemp(prefix="jat_test_runner_")
+    try:
+        env = dict(os.environ)
+        env[PROBE_ENV] = os.path.join(tmp2, "probe.json")
+        r = subprocess.run([sys.executable, os.path.join(TOOLS, "run_tests.py"), "hidden_desktop", "--visible"],
+                           cwd=ROOT, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                           timeout=180)
+        assert r.returncode == 0, f"the runner exited {r.returncode}:\n{r.stdout[-600:]}\n{r.stderr[-300:]}"
+        return r.stdout
+    finally:
+        import shutil as _sh
+        _sh.rmtree(tmp2, ignore_errors=True)
+
+
+try:
+    RUNNER_OUT = runner_output()
+except Exception as e:  # noqa: BLE001 — the two checks below report it
+    RUNNER_OUT = f"(the runner could not be run: {type(e).__name__}: {e})"
+
+
+def inner_skip_reported():
+    # A passing suite that left a check out says so on a "SKIP" line; the runner's
+    # one line per suite would hide it (on a private desktop the GPU picture check
+    # cannot grab the screen), so the runner repeats those lines at the end.
+    assert "left out inside suites that passed" in RUNNER_OUT, RUNNER_OUT[-400:]
+    assert "test_hidden_desktop: SKIP  probe: a planted check that did not run" in RUNNER_OUT, RUNNER_OUT[-400:]
+
+
+check("a check a passing suite left out (a SKIP line) is repeated in the runner's summary", inner_skip_reported)
+
+
+def inner_info_reported():
+    # A number a suite measures but does not judge is on an "INFO" line. The Mac
+    # runner's frame rate was printed that way and never seen: the runner repeats
+    # those lines too, whole (the planted one is 250 characters long).
+    assert "marked INFO in suites that passed" in RUNNER_OUT, RUNNER_OUT[-600:]
+    line = next((ln for ln in RUNNER_OUT.splitlines()
+                 if ln.strip().startswith("test_hidden_desktop: INFO  probe: a planted number, 12.3 fps")), None)
+    assert line is not None, RUNNER_OUT[-600:]
+    assert line.rstrip().endswith("END-OF-LINE"), f"the INFO line was cut short: {line[-80:]!r}"
+
+
+check("a number a passing suite printed (an INFO line) is repeated in the runner's summary, whole",
+      inner_info_reported)
 
 print(f"\n{'=' * 50}")
 print(f"Results: {passed} passed, {failed} failed out of {passed + failed}")

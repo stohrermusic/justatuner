@@ -2,8 +2,10 @@
 
 Each tools/test_*.py is a standalone script (not pytest), so each runs in
 its own interpreter from the repo root. One line per suite, then the
-failures' output in full. CI runs this on Windows, macOS and Linux (under
-xvfb); locally it's the "run everything before a release" command.
+failures' output in full, then the totals, then what one line per passing
+suite would hide: its "SKIP" lines (checks left out) and its "INFO" lines
+(numbers measured, not judged). CI runs this on Windows, macOS and Linux
+(under xvfb); locally it's the "run everything before a release" command.
 
     python tools/run_tests.py                 # all suites
     python tools/run_tests.py engine canvas   # only suites whose name contains a word
@@ -66,6 +68,7 @@ def main(argv):
     failed, skipped, ran = [], [], 0
     self_skipped = []
     inner_skips = []
+    inner_info = []
     t_all = time.time()
     for fname in suites:
         name = fname[:-3]
@@ -107,7 +110,12 @@ def main(argv):
             # A passing suite can still have left a check out and said so on a
             # line starting "SKIP" (no GPU wheel, a screen that cannot be
             # grabbed). One line per suite hides that: collect them.
-            inner_skips += [(name, ln.strip()) for ln in out.splitlines() if ln.strip().startswith(("SKIP ", "SKIP:"))]
+            lines = [ln.strip() for ln in out.splitlines()]
+            inner_skips += [(name, ln) for ln in lines if ln.startswith(("SKIP ", "SKIP:"))]
+            # Same for a number a suite measures but does not judge (a line
+            # starting "INFO"): the Mac runner's frame rate was printed on
+            # every run and shown on none (CI on 308c4b6).
+            inner_info += [(name, ln) for ln in lines if ln.startswith(("INFO ", "INFO:"))]
     for name, out in failed:
         print("\n" + "=" * 70 + f"\nFAILED: {name} — output:\n" + "=" * 70)
         print("\n".join(out.splitlines()[-60:]))
@@ -122,6 +130,10 @@ def main(argv):
             print(f"  {name}: {ln[:150]}")
         if os.environ.get(hidden_desktop.ENV_FLAG) and any("screen" in ln for _, ln in inner_skips):
             print("  (the screen cannot be grabbed from a private desktop: run that suite with --visible for those)")
+    if inner_info:
+        print(f"{len(inner_info)} line(s) marked INFO in suites that passed (measured or noted, not judged):")
+        for name, ln in inner_info:
+            print(f"  {name}: {ln}")
     if failed:
         print("FAILED: " + ", ".join(n for n, _ in failed))
         return 1
