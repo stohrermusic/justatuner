@@ -652,15 +652,19 @@ class TunerView:
         ctrl_frame = tk.Frame(self._tuner_main_frame, bg=ctrl_bg, padx=6, pady=6)
         ctrl_frame._skip_theme = True
         ctrl_frame.pack(fill="x", padx=5, pady=(0, 4))
-        # Three equal-weight columns, with `uniform="third"` so each
-        # column stays exactly 1/3 of the panel regardless of how wide
-        # its content is. Left third hosts all three slider groups,
-        # middle third the motor pilot, right third the VU meter.
+        self._tuner_ctrl_frame = ctrl_frame
+        # Two equal side columns and a middle one that takes only what the
+        # motor pilot asks for. The sides being equal keeps the pilot in
+        # the middle of the bar. Until 2026-11-25 this was three equal
+        # thirds: the groups ask for 346, 157 and 258 px, so the left one
+        # overflowed below about 1070 px of window while the middle third
+        # had 190 px to spare (Matt: "when run in a smaller window,
+        # controls get cut off"). Now the bar fits from about 890 px.
         # Children are placed without an `ew` sticky so they hug their
         # content width and center inside their column.
-        ctrl_frame.columnconfigure(0, weight=1, uniform="third")
-        ctrl_frame.columnconfigure(1, weight=1, uniform="third")
-        ctrl_frame.columnconfigure(2, weight=1, uniform="third")
+        ctrl_frame.columnconfigure(0, weight=1, uniform="side")
+        ctrl_frame.columnconfigure(1, weight=0)
+        ctrl_frame.columnconfigure(2, weight=1, uniform="side")
 
         # Left third — wraps the three slider groups (DISP / PITCH /
         # BIAS) in a single frame so they stay together and center as

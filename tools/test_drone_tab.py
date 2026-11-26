@@ -155,6 +155,24 @@ def main():
         check(f"visualizer {mode}: frames drawn, no callback exception, scope has items",
               lambda m=mode, b=before: len(tk_errors) == b and len(ex.scope.find_all()) > 0)
 
+        # The scope is resized with the window (it is the part of the tab
+        # that gives, 2026-11-25): shrunk to the window's minimum and grown
+        # back, each mode keeps drawing, inside the scope's new square.
+        def survives_a_resize(b=before):
+            seen = []
+            for geom in ("%dx%d+0+0" % app.root.minsize(), "1000x720+0+0"):
+                app.root.geometry(geom)
+                _run(app, 0.5)
+                s = ex.scope
+                box = s.bbox("all")
+                assert box is not None and box[0] >= -3 and box[1] >= -3 \
+                    and box[2] <= s._size + 3 and box[3] <= s._size + 3, f"drawn outside a {s._size} px scope: {box}"
+                seen.append(s._size)
+            assert len(tk_errors) == b, tk_errors[-1][-300:]
+            assert seen[0] < seen[1], f"the scope did not follow the window: {seen}"
+        check(f"visualizer {mode}: keeps drawing inside the scope when the window is shrunk and grown",
+              survives_a_resize)
+
     # ---- a progression on the synthetic tone --------------------------
     # The tone stays E3; the root moves C -> F -> G -> C, so the interval
     # read against it must go Major 3rd -> Major 7th -> Major 6th -> Major 3rd.

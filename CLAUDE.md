@@ -16,6 +16,10 @@ JustATuner is a free cross-platform desktop tuner for musicians by [Matt Stohrer
 
 One dated bullet per expensive lesson, phrased as the mechanism, with the gate that now protects it. Newest first.
 
+- **2026-11-25 — `pack` hands out space in packing order; what is packed last is what gets squeezed.** The drone tab was packed top to bottom as it reads, with a scope of a fixed 380 px near the top, so on a short window the last rows (root buttons, the DRONE and MIC lines) lost 9–17 px while the picture stayed whole: on a 1920×1080 laptop at 150 % (about 1280×621 maximised) and a 1366×768 one (about 1366×669). Fixed-size parts are now packed first (`side="bottom"` for the control panel and the drone and progression rows) and the scope panel last; `_fit_scope` sizes the scope to its panel between `SCOPE_MIN_SIZE` (240) and `SCOPE_MAX_SIZE` (380), and `RoundScope.set_size` redraws the bezel. Measured: scope 288 px at 1280×621, 336 at 1366×669, 380 from about 715 px of height. Gated in `test_layout` (a walk of every widget for anything sticking out of its parent or given less than it asks for) and `test_drone_tab` (all six modes keep drawing inside a resized scope).
+- **2026-11-25 — grid's `uniform` makes columns equal, so the widest one overflows while a narrow one has room.** The tuner's control bar was three `uniform` thirds; its groups ask for 346, 157 and 258 px, so the left one stuck out below about 1070 px of window (34 px at the old 960 minimum) with 190 px spare in the middle (Matt: "when run in a smaller window, controls get cut off"). The two sides are `uniform`, which is what keeps the pilot centred, and the middle takes its own width: fits from about 890 px. Gated in `test_layout` (nothing cut off; the pilot within 2 px of the bar's centre at every width).
+- **2026-11-25 — The window's minimum size was a constant (960×620) under what either tab needed.** It is measured at startup: `JustATunerApp._set_minimum_size` takes the notebook's own request, less the scope's spare height (`ExerciserView.min_size`), capped to the screen: 937×599 here. This also answers the 2026-10-06 entry below (the drone status row cut off on Aqua at about 975×650); the next `mac-tour` pictures are the check. Open, older than this and at every window size: the PROG line is a fixed 34 characters and its idle text needs 37 ("…(4 chords, ba").
+
 - **2026-11-25 — "Lit" is not "has a partial": the ring threshold is the whole spectrum's median, and a room's low end sits far above it** (16× and 24× in two captures of this room). Under an A4 the rings A1, A2 and A3, where the note has nothing, cleared the threshold in 77–97 % of frames and were steered by rumble, reading anywhere within ±300 c: the inner rings wandered both ways and the disc "did not seem solid" (Matt). A ring now follows its own pitch only for a real peak of its own: within 50 c of the ring's note, 12 dB over the bins 3 away (just outside a Hann lobe), and for 0.1 s without a break (`RING_OWN_*` in `tuner/engine.py`); anything else turns with its wheel. The first two tests were set from 106,650 lit ring-frames (0.46 % of rings with no partial still tracked, 94 % of a steady note's real partials kept); the hold removes the single-frame chance passes. A partial that is not an exact multiple still drifts on its own ring (+4.00 and +9.00 c read back). Gated in `test_tuner_engine` on a room harsher than the measured one (old code: the three low rings go left in half the frames).
 - **2026-11-25 — On Windows a Tk `after()` is rounded up to the system timer tick, 15.6 ms by default, and the frame loop added its wait after the work.** 4 ms of work + `after(16)` was 31 ms: 32 fps on the 60 setting and 63 on the 120 setting (which is why SSC, saved at 120, looked twice as fast as this app at 60, with the same loop). At 32 fps the fine outer rings step more than half a stripe per frame from about 8 c off and appear to run backwards. `tuner.view.fine_timer` holds a 1 ms tick (`timeBeginPeriod`) only while the tuner runs, and `FramePacer` paces frames on a clock: 59.7–60.0 fps at 60, 120 at 120, measured. The 1 ms tick alone gave 40 fps; both parts are needed. Gated in `test_tuner_canvas` (old code: median frame 31.9 fps), judged on the median frame and only where a frame keeps Tk busy under 85 % of the period.
 - **2026-11-25 — A short `after()` armed at the end of a frame comes due before Tk's idle work, and the redraws are idle work.** The first paced loop armed the next frame with the 1 ms floor from inside the frame; on the canvas path, whose redraw is long, frames started before the last one had been drawn. The next frame is armed from an `after_idle` callback (`_tuner_arm_next_frame`), which also puts the redraw time inside the pacing. Gated by the starvation assertion in `test_tuner_canvas`'s loop timer (it caught this).
@@ -103,7 +107,7 @@ audio_utils.py          → AudioRingBuffer, hann_peak_freq() (Hann closed-form
                           import_sounddevice()/sounddevice_error() (the one
                           sounddevice import), pitch_or_default()
 tools/run_tests.py      → runs every tools/test_*.py (see Tests)
-tools/test_*.py         → test_tuner_engine, test_gpu_tuner, test_tuner_canvas
+tools/test_*.py         → thirteen suites; see CLAUDE-testing.md
 audio_latency.py        → Help > Test Audio Latency…: loopback round-trip
                           measurement (chirps out, cross-correlate mic);
                           pure numpy + sounddevice, dialog lives in main.py
@@ -173,6 +177,8 @@ installer.iss           → Inno Setup script for Windows installer
 
 ## Window Behavior
 
+**Minimum size** is measured, not fixed: `_set_minimum_size` (main.py) asks the notebook what its tabs need with the drone tab's scope at its smallest, so nothing is cut off at the minimum on any platform's fonts (937×599 on Windows at this machine's scaling). `test_layout` holds it under 1280×621, a maximised window on a 1920×1080 laptop at 150 %. On each tab one part gives when the window shrinks: the wheel area on the tuner tab, the round scope (240–380 px) on the drone tab.
+
 App opens **maximized** on every platform: `state('zoomed')` on Windows, `attributes('-zoomed', True)` on Linux/X11, screen-sized geometry fallback on macOS (Aqua has no programmatic maximize). The fallback geometry is the screen size + position (0, 0); the user can drag/resize from there.
 
 ## Tab-Specific Menu
@@ -215,7 +221,7 @@ The detail lives beside this file, split by subject so each stays short. Edit th
 
 - **CLAUDE-tuner.md** — the strobe tuner engine (FFT, the Hann estimator, phase tracking, stream health, the synthetic source)
 - **CLAUDE-drone.md** — the drone engine (synth, samples, recording, drone-bleed cancellation, the room table, progressions), the visualizer modes, the garden
-- **CLAUDE-testing.md** — the twelve suites and their rules, `--selftest`, `--tour`, smoke-test patterns
+- **CLAUDE-testing.md** — the thirteen suites and their rules, `--selftest`, `--tour`, smoke-test patterns
 - **CLAUDE-build.md** — PyInstaller and macOS signing, the release process, CI, the config folder
 
 @CLAUDE-tuner.md

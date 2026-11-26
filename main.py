@@ -60,7 +60,7 @@ class JustATunerApp:
         # Fallback geometry — used if maximize fails (e.g. unusual WMs)
         # and as the size the window restores to when un-maximized.
         self.root.geometry("1100x720")
-        self.root.minsize(960, 620)
+        self.root.minsize(960, 620)      # replaced below by what the tabs ask for
         self._maximize_window()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         # WM_DELETE_WINDOW only covers the window close button. On macOS,
@@ -87,6 +87,8 @@ class JustATunerApp:
         self.notebook.add(self.exerciser_frame, text="Just Intonation Drone")
         self.exerciser = ExerciserView(self.exerciser_frame, self.root,
                                        self.settings)
+        self._set_minimum_size()
+
         # Both tabs' device lists ask the app to look for devices again: a
         # rescan needs every stream closed, and only the app knows them all.
         self.tuner.rescan_devices = self._rescan_audio_devices
@@ -122,6 +124,27 @@ class JustATunerApp:
 
     def run(self):
         self.root.mainloop()
+
+    def _set_minimum_size(self):
+        """The window can be made no smaller than its tabs need.
+
+        The notebook asks for its widest and tallest tab plus its own tab
+        row; the drone tab's scope is the one part that shrinks, so its
+        spare height comes off. Measured, not guessed: fonts differ by
+        platform and by display scaling, and the fixed 960x620 was under
+        what either tab needed (the tuner bar overflowed at that width, the
+        drone tab's bottom rows were squeezed at that height; on Aqua the
+        status row was cut off at about 975x650). Never more than the screen.
+        """
+        try:
+            self.root.update_idletasks()
+            spare = self.exerciser_frame.winfo_reqheight() - self.exerciser.min_size()[1]
+            need_w = self.notebook.winfo_reqwidth()
+            need_h = self.notebook.winfo_reqheight() - max(0, spare)
+            sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+            self.root.minsize(min(need_w, sw), min(need_h, max(200, sh - 80)))
+        except (tk.TclError, AttributeError) as e:
+            logging.warning("Could not measure the window's minimum size: %s", e)
 
     def _maximize_window(self):
         """Open maximized on every platform.

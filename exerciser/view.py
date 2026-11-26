@@ -65,6 +65,13 @@ COLOR_LOCKED = COLOR_PHOSPHOR
 COLOR_CLOSE = COLOR_AMBER
 COLOR_FAR = COLOR_RED
 
+# The round scope is the one part of the tab that gives when the window is
+# short: full size where there is room, never under the minimum. At a fixed
+# 380 it pushed the rows below it off a 1920x1080 laptop at 150 % scaling
+# and a 1366x768 one (2026-11-25); 240 leaves a 98 px screen radius.
+SCOPE_MAX_SIZE = 380
+SCOPE_MIN_SIZE = 240
+
 LOCK_THRESHOLD = 5.0
 CLOSE_THRESHOLD = 15.0
 LISSAJOUS_POINTS = 1200
@@ -455,21 +462,29 @@ class ExerciserView:
 
         tk.Frame(self._frame, bg=COLOR_GOLD, height=1).pack(fill="x", padx=15)
 
+        # PACKING ORDER IS THE LAYOUT RULE HERE. pack hands out space in the
+        # order widgets were packed, and whatever is packed last gets what
+        # is left, squeezed if there is too little. So everything of fixed
+        # size goes in first (the control panel at the bottom, then the
+        # drone and progression rows at the bottom of the left column) and
+        # the scope panel goes in last: on a short window it is the scope
+        # that gives, never a row of controls. Packed top to bottom as they
+        # appear, the last rows (root buttons, DRONE and MIC lines) were the
+        # ones cut off (2026-11-25).
+        controls = tk.Frame(self._frame, bg=COLOR_PANEL)
+        controls.pack(side="bottom", fill="x", padx=10, pady=(4, 8), ipady=4)
+        tk.Frame(self._frame, bg=COLOR_GROOVE, height=1).pack(side="bottom", fill="x", padx=15)
+
         body = tk.Frame(self._frame, bg=COLOR_CHASSIS)
         body.pack(fill="both", expand=True, padx=10, pady=(8, 4))
 
         left_col = tk.Frame(body, bg=COLOR_CHASSIS)
         left_col.pack(side="left", fill="both", expand=True)
 
-        self._build_scope_panel(left_col)
-        self._build_drone_row(left_col)
-        self._build_progression_row(left_col)
+        self._build_progression_row(left_col)     # bottom of the column
+        self._build_drone_row(left_col)           # above it
+        self._build_scope_panel(left_col)         # the rest
         self._build_interval_panel(body)
-
-        tk.Frame(self._frame, bg=COLOR_GROOVE, height=1).pack(fill="x", padx=15)
-
-        controls = tk.Frame(self._frame, bg=COLOR_PANEL)
-        controls.pack(fill="x", padx=10, pady=(4, 8), ipady=4)
 
         self._build_note_controls(controls)
         tk.Frame(controls, bg=COLOR_GROOVE, width=1).pack(
@@ -478,8 +493,14 @@ class ExerciserView:
         self._build_status_section(controls)
 
     def _build_scope_panel(self, parent):
-        frame = tk.Frame(parent, bg=COLOR_CHASSIS)
-        frame.pack(expand=True, pady=(5, 2))
+        # The panel takes whatever height the column has left (it is packed
+        # last, see _build_ui); the label, scope and ratio line sit together
+        # in the middle of it, and _fit_scope sizes the scope to the panel.
+        panel = tk.Frame(parent, bg=COLOR_CHASSIS)
+        panel.pack(fill="both", expand=True, pady=(5, 2))
+        self._scope_panel = panel
+        frame = tk.Frame(panel, bg=COLOR_CHASSIS)
+        frame.pack(expand=True)
 
         # Label is dynamic — reflects the active visualizer mode.
         self.scope_mode_label = tk.Label(
@@ -489,7 +510,10 @@ class ExerciserView:
         )
         self.scope_mode_label.pack(pady=(0, 2))
 
-        self.scope = RoundScope(frame, size=380, bg=COLOR_CHASSIS)
+        # Built at the minimum, so what the tab asks for before its first
+        # layout is what it needs at the least (see min_size); _fit_scope
+        # grows it to the room there is.
+        self.scope = RoundScope(frame, size=SCOPE_MIN_SIZE, bg=COLOR_CHASSIS)
         self.scope.pack()
 
         self.ratio_label = tk.Label(
@@ -497,10 +521,28 @@ class ExerciserView:
             fg=COLOR_PHOSPHOR, bg=COLOR_CHASSIS,
         )
         self.ratio_label.pack(pady=(2, 0))
+        panel.bind("<Configure>", self._fit_scope)
+
+    def _fit_scope(self, event=None):
+        """Size the scope to its panel: as large as fits, between
+        SCOPE_MIN_SIZE and SCOPE_MAX_SIZE. The panel's own size does not
+        depend on the scope's (it is given what the column has left), so
+        this settles in one pass."""
+        panel = self._scope_panel
+        around = (self.scope_mode_label.winfo_reqheight() + 2
+                  + self.ratio_label.winfo_reqheight() + 2)
+        room = min(panel.winfo_height() - around, panel.winfo_width())
+        self.scope.set_size(max(SCOPE_MIN_SIZE, min(SCOPE_MAX_SIZE, room)))
+
+    def min_size(self):
+        """(width, height) this tab needs with the scope at its minimum."""
+        self._frame.update_idletasks()
+        spare = self.scope._size - SCOPE_MIN_SIZE
+        return self._frame.winfo_reqwidth(), self._frame.winfo_reqheight() - spare
 
     def _build_drone_row(self, parent):
         row = tk.Frame(parent, bg=COLOR_CHASSIS)
-        row.pack(pady=(2, 4))
+        row.pack(side="bottom", pady=(2, 4))      # fixed rows first; see _build_ui
 
         # DRONE switch — a labeled two-position rocker. Click OFF or ON
         # to set; the active side lights up amber (off) or red (on) like
@@ -933,7 +975,7 @@ class ExerciserView:
         """Transport under the drone row: Start/Stop, Next, and the current
         and next chord (or the calibration / count-in state)."""
         row = tk.Frame(parent, bg=COLOR_CHASSIS)
-        row.pack(pady=(0, 4))
+        row.pack(side="bottom", pady=(0, 4))      # fixed rows first; see _build_ui
         tk.Label(row, text="PROG", font=("Helvetica", 7, "bold"),
                  fg=COLOR_CREAM_DIM, bg=COLOR_CHASSIS).pack(side="left", padx=(8, 4))
         self.prog_btn = tk.Button(

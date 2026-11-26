@@ -14,6 +14,26 @@ class RoundScope(tk.Canvas):
         self._bg = bg
         self._bezel_drawn = False
 
+    def set_size(self, size):
+        """Make the scope `size` pixels square. The bezel and graticule are
+        redrawn at the new size if they were drawn; everything else on the
+        canvas is the caller's and is placed from get_draw_area() on its
+        next frame. True if the size changed."""
+        size = int(size)
+        if size == self._size:
+            return False
+        self._size = size
+        self.configure(width=size, height=size)
+        if self._bezel_drawn:
+            self.draw_bezel()
+            self.draw_graticule()
+            # New items land on top: put the screen fill and the grid back
+            # under whatever the visualizer has drawn, the ring over it.
+            self.tag_lower("graticule")
+            self.tag_lower("bezel")
+            self.tag_raise("bezel_ring")
+        return True
+
     def get_draw_area(self):
         """Return (center_x, center_y, usable_radius) for the CRT screen."""
         s = self._size
