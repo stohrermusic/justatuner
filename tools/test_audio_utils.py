@@ -203,6 +203,8 @@ test(f"symmetric Hann on-bin neighbours [0.5, 1, 0.5]: d = 0 (got {sym - 2:+.4f}
 # decaying with tau 50 ms: +0.021 bin, and -0.030/+0.030 for tones only
 # +-0.01 bin either side (tau 20 ms: +-0.11 bin) -- a jump across d = 0.
 # 2(R-L)/(L+2P+R) is equally exact on a clean Hann lobe and gives 0 here.
+# (2026-11-25: it is no better over the whole bin; its jump of the same
+# size sits half way between bins. See the sweep in test_tuner_engine.)
 symb = hann_peak_freq(np.array([0.0, 0.8, 1.0, 0.8, 0.0]), 2, 1.0)
 test(f"symmetric broadened neighbours [0.8, 1, 0.8]: d = 0 (got {symb - 2:+.4f})",
      abs(symb - 2.0) < 1e-9)

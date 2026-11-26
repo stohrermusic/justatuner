@@ -100,13 +100,25 @@ def hann_peak_freq(mags, k, bin_freq):
     offset exactly: |X[k+1]| / |X[k]| = (1 + d) / (2 - d) and
     |X[k-1]| / |X[k]| = (1 - d) / (2 + d), and the two together give
     d = 2 (R - L) / (L + 2 P + R), which is exact on a clean lobe (the
-    same 0.0002 bin as the one-neighbour form) and also symmetric: a note
-    that decays during the frame broadens its lobe evenly, and the
-    one-neighbour form (2a-1)/(a+1) read a 20 ms decay 0.105 bin off
-    (4.5 c at A4, 18 c at A2) where this reads 0.000 (measured
-    2026-10-06, found by tools/test_audio_utils.py). Rejected alternative,
-    measured in SSC: a 4x zero-padded FFT is equally accurate at four
-    times the cost.
+    same 0.0002 bin as the one-neighbour form (2a-1)/(a+1) that SSC uses)
+    and symmetric about a bin centre.
+
+    Neither form is exact on a note that decays during the frame, which
+    broadens the lobe. Corrected 2026-11-25: the 2026-10-06 note here said
+    this form "reads 0.000" where the one-neighbour form read 0.105 bin on
+    a 20 ms decay; that was measured only within 0.01 bin of a bin centre.
+    Over every offset in a bin both forms have the same worst error (0.105
+    and 0.107 bin at 20 ms, 0.006 and 0.007 at 100 ms, 0.0008 and 0.0009
+    at 300 ms) and the same 0.21-bin jump: at the bin centre for the
+    one-neighbour form, half way between two bins for this one. Through
+    the tuner on struck notes C2-C6 this form was no better (300 ms decay:
+    median worst error 4.3 c against 3.3 c, the smaller error on 14 notes
+    of 49 against 33). It stays for now on the tuner alone; SSC keeps the
+    one-neighbour form because its Analyzer's vibrato readings got worse
+    with this one.
+
+    Rejected alternative, measured in SSC: a 4x zero-padded FFT is equally
+    accurate at four times the cost.
 
     The formula needs k to be the lobe's maximum, but callers pick k from
     a fixed window (the engine looks at the 3 bins round the reference

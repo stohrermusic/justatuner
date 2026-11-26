@@ -75,19 +75,33 @@ for d_true in (-0.45, -0.3, -0.1, 0.0, 0.1, 0.25, 0.4, 0.5):
 test(f"Hann estimator on a pure Hann lobe within 0.01 bin (worst {worst_bin:.4f} bin)",
      worst_bin < 0.01)
 
-# A note that decays during the frame broadens its lobe on both sides. The
-# one-neighbour form read a 20 ms decay on bin 40 as +0.105 bin (4.5 c at
-# A4, 18 c at A2); the two-neighbour form reads 0.000 (2026-10-06).
-worst_decay = 0.0
-for tau_s in (0.1, 0.05, 0.02):
+# A note that decays during the frame broadens its lobe on both sides, and
+# NEITHER closed form is exact on it. Until 2026-11-25 this check tried only
+# offsets within 0.01 bin of a bin centre and concluded "the two-neighbour
+# form reads 0.000": true there and nowhere else (the SSC session swept the
+# whole bin and said so). Over every offset in a bin the two forms have the
+# same worst error (20 ms decay: 0.105 one-neighbour, 0.107 two-neighbour)
+# and the same 0.21-bin jump, at the bin centre for the one-neighbour form
+# and half way between bins for this one. The bounds below are the measured
+# ones for the form in use; at a realistic decay (300 ms and slower) the
+# error is under 0.001 bin, 0.04 c at A4, either way.
+_decay_worst, _decay_centre = {}, 0.0
+for tau_s in (0.3, 0.1, 0.02):
     env = np.exp(-_t / tau_s)
-    for d_true in (-0.01, 0.0, 0.01):
+    errs = []
+    for d_true in np.linspace(-0.5, 0.5, 101):
         f = (40 + d_true) * _bin
         mags = np.abs(np.fft.rfft(np.sin(2 * np.pi * f * _t) * env * _w))
-        got = hann_peak_freq(mags, 40, _bin) / _bin - 40
-        worst_decay = max(worst_decay, abs(got - d_true))
-test(f"Hann estimator on a decaying note (tau 100/50/20 ms) within 0.01 bin (worst {worst_decay:.4f} bin)",
-     worst_decay < 0.01)
+        errs.append(hann_peak_freq(mags, 40, _bin) / _bin - 40 - d_true)
+    _decay_worst[tau_s] = float(np.max(np.abs(errs)))
+    _decay_centre = max(_decay_centre, float(np.max(np.abs(errs[49:52]))))
+test("Hann estimator on a decaying note, worst over every offset in a bin: "
+     f"300 ms {_decay_worst[0.3]:.4f} (< 0.002), 100 ms {_decay_worst[0.1]:.4f} (< 0.01), "
+     f"20 ms {_decay_worst[0.02]:.4f} (< 0.12) bin",
+     _decay_worst[0.3] < 0.002 and _decay_worst[0.1] < 0.01 and _decay_worst[0.02] < 0.12)
+test(f"...and no jump across a bin centre, where the one-neighbour form flips sign "
+     f"(within 0.01 bin of the centre, down to a 20 ms decay: {_decay_centre:.4f} < 0.003 bin)",
+     _decay_centre < 0.003)
 
 # Every semitone A1-A6 at 440-tuning, exactly in tune, through the engine.
 # Pure sine first: this is the estimator alone (old code: 15.3 c worst).
