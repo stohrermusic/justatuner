@@ -32,7 +32,7 @@ The key alone is **not sufficient**: PyInstaller ad-hoc signs the bundle during 
 
 ```bash
 # 1. Bump version in config.py and installer.iss
-# 2. Write release_notes_vX.Y.Z.md
+# 2. Write release_notes_vX.Y.Z.md (short, from the user's side: see Versioning in CLAUDE.md)
 # 3. Commit on beta and push
 git push origin beta
 
