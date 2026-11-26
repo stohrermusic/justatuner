@@ -534,13 +534,15 @@ def main():
         root.update()
         holds_before = tv._fine_timer_holds
         held = tv.fine_timer(True)
-        pacer, stamps = tv.FramePacer(), []
+        pacer, stamps, due = tv.FramePacer(), [], []
 
         def frame():
             stamps.append(time.perf_counter())
             while time.perf_counter() - stamps[-1] < 0.004:            # 4 ms of work, as the GPU tab does
                 pass
-            root.after(pacer.next_delay_ms(1.0 / 60.0), frame)
+            delay = pacer.next_delay_ms(1.0 / 60.0)
+            due.append(time.perf_counter() + delay / 1000.0)           # when the timer was asked to fire
+            root.after(delay, frame)
         frame()
         root.after(2000, root.quit)
         root.mainloop()
@@ -550,7 +552,23 @@ def main():
         assert tv._fine_timer_holds == holds_before, (tv._fine_timer_holds, holds_before)
         gaps = sorted(b - a for a, b in zip(stamps, stamps[1:]))
         fps = 1.0 / gaps[len(gaps) // 2]
-        assert 57.0 <= fps <= 63.0, f"median frame {fps:.1f} fps (worst frame {1000 * gaps[-1]:.0f} ms)"
+        late = sorted(s - d for s, d in zip(stamps[1:], due))          # how late each timer fired
+        numbers = (f"median frame {fps:.1f} fps, worst frame {1000 * gaps[-1]:.0f} ms, timers fired "
+                   f"{1000 * late[len(late) // 2]:.1f} ms late (median), {1000 * late[-1]:.0f} ms at worst")
+        # Printed on every run, pass or fail: a check that only speaks when it
+        # fails left no record of what the Mac runner read on the runs it passed.
+        if sys.platform == "darwin":
+            # Not judged on macOS. The same code on the same runner image passed
+            # on two pushes and read 47.2 fps (worst frame 76 ms) on the third
+            # (CI on 38d3512, 2026-11-25); SSC measured 54.9-60.8 on that runner
+            # type. Timers there are fine without any help, so the loop this
+            # replaced would read about 50 (4 ms + after(16)): the runner's own
+            # spread covers the difference this check exists to see. The 1 ms
+            # tick it proves is a Windows matter, and is judged on Windows.
+            print(f"  INFO  bare paced loop: {numbers} (measured, not judged on macOS: a shared runner's timers)")
+            return
+        print(f"  INFO  bare paced loop: {numbers}")
+        assert 57.0 <= fps <= 63.0, numbers
     check("a Tk loop paced by FramePacer under fine_timer runs 4 ms frames at 60 a second; the timer hold is released",
           pacer_on_a_real_timer)
 
