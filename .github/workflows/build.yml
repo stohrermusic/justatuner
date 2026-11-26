@@ -50,13 +50,21 @@ jobs:
         # 2026-11-25 run: "PulseAudio_Initialize: Can't connect to server").
         # This says in the log whether one was answering and tries to start
         # one; run_tests.py says how many suites skipped themselves.
+        # The ubuntu-latest image has neither a server nor pactl (the first
+        # run of this step, 2026-11-25: "no pactl on this runner", and four
+        # GUI suites skipped themselves), so one is installed here first.
         continue-on-error: true
         run: |
-          command -v pactl >/dev/null || { echo "no pactl on this runner: cannot ask the sound server"; exit 0; }
+          if ! command -v pactl >/dev/null; then
+            echo "no pactl on this runner: installing a sound server"
+            sudo apt-get install -y pulseaudio pulseaudio-utils || sudo apt-get install -y pipewire-pulse pulseaudio-utils || true
+          fi
+          command -v pactl >/dev/null || { echo "still no pactl: cannot ask the sound server"; exit 0; }
           if pactl info >/tmp/sound-server 2>&1; then head -3 /tmp/sound-server; exit 0; fi
           echo "no sound server answering; trying to start one"
-          (pulseaudio --start --exit-idle-time=-1 2>&1 || systemctl --user start pipewire-pulse 2>&1 || true)
+          (pulseaudio --start --exit-idle-time=-1 2>&1 || systemctl --user start pipewire pipewire-pulse 2>&1 || true)
           sleep 2
+          pactl load-module module-null-sink >/dev/null 2>&1 || true
           if pactl info >/tmp/sound-server 2>&1; then head -3 /tmp/sound-server; else echo "still no sound server: PortAudio may not start on this runner"; fi
       - name: Install dependencies
         run: |

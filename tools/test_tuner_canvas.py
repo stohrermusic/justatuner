@@ -288,14 +288,26 @@ def _loop_rate(app, view, seconds=2.0):
     return 1.0 / gaps[len(gaps) // 2], len(gaps) / sum(gaps), 1000.0 * sum(work) / len(work)
 
 
-def _check_loop_rate(label, app, view):
+def _check_loop_rate(label, app, view, judge=True):
     """The 60 setting gives 60 frames a second wherever a frame leaves room
     for it (2026-11-25: it gave 32 on Windows). Where a frame keeps Tk busy
-    for over 85 % of the period (the canvas renderer, a slow CI runner) the rate
-    is printed, not judged."""
+    for over 85 % of the period (a slow CI runner) the rate is printed, not
+    judged.
+
+    The canvas renderer is never judged (judge=False), only measured: it is
+    bound by its own redraw, and that cost is not all visible from Tk. On
+    the Mac runner the canvas tab ran at a median 35.9 fps with Tk busy only
+    8.5 ms a frame (Aqua draws outside Tk's idle work), in the same run in
+    which the bare paced loop held 60: the pacing was right and this check
+    failed on the redraw. Here it has measured anywhere from 9 to 56 fps.
+    The pacing itself is gated by the FramePacer checks and the GPU tab."""
     view._tuner_fps_var.set("60")
     _run_frames(app, view, seconds=0.5, min_frames=0)
     fps, mean_fps, work_ms = _loop_rate(app, view)
+    if not judge:
+        print(f"  INFO  {label}: median frame {fps:.1f} fps, mean {mean_fps:.1f}, on the 60 setting with Tk busy "
+              f"{work_ms:.1f} ms per frame (measured, not judged: this renderer is bound by its redraw)")
+        return
     if work_ms > 0.85 * 1000.0 / 60.0:
         print(f"  SKIP  {label}: {mean_fps:.0f} fps on the 60 setting with Tk busy {work_ms:.1f} ms per frame "
               f"(over 85 % of the 16.7 ms period: the loop cannot keep up here)")
@@ -475,7 +487,7 @@ def main():
         assert "rp = list(result.ring_phase_offsets[i])" not in src, "the canvas path sends raw phases"
     check("both renderers take their phases through window_phases; the bottom row's discs turn the other way",
           one_rule_for_both_renderers)
-    _check_loop_rate("canvas", app, view)
+    _check_loop_rate("canvas", app, view, judge=False)
 
     view.stop()
     app.root.update_idletasks()
