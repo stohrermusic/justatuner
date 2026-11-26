@@ -12,6 +12,9 @@ xvfb); locally it's the "run everything before a release" command.
         # skipped (reported), not failed
     python tools/run_tests.py --skip gpu
         # leave out suites by name (reported as skipped, never silently)
+    python tools/run_tests.py --visible
+        # Windows: keep the suites' windows on this desktop. Without it they
+        # run on a private desktop (tools/hidden_desktop.py) and nothing shows.
 
 Same runner as Stohrer Sax Shop Companion's tools/run_tests.py.
 """
@@ -36,9 +39,19 @@ def summary_line(output):
 
 
 def main(argv):
+    # On Windows, outside CI, the whole run moves to a private desktop first, so
+    # no suite's window shows on, or takes the focus from, the desktop someone
+    # is using: this process re-runs itself there and every suite inherits it.
+    # --visible (or JUSTATUNER_VISIBLE=1) keeps it here. The first line printed
+    # says where the suites are.
+    sys.path.insert(0, TOOLS)
+    import hidden_desktop
+    if hidden_desktop.wanted(argv):
+        return hidden_desktop.rerun_hidden([sys.executable] + list(argv))
+    print(hidden_desktop.where(argv), flush=True)
     allow_missing = []
     skip_names = []
-    args = list(argv[1:])
+    args = [a for a in argv[1:] if a != "--visible"]
     while "--allow-missing" in args:
         i = args.index("--allow-missing")
         allow_missing.append(args[i + 1])
@@ -52,6 +65,7 @@ def main(argv):
     env = dict(os.environ, PYTHONIOENCODING="utf-8")
     failed, skipped, ran = [], [], 0
     self_skipped = []
+    inner_skips = []
     t_all = time.time()
     for fname in suites:
         name = fname[:-3]
@@ -89,6 +103,11 @@ def main(argv):
         print(f"{status} {name:28s} {time.time() - t0:5.1f}s  {verdict[:72]}", flush=True)
         if code != 0:
             failed.append((name, out))
+        elif status == "ok  ":
+            # A passing suite can still have left a check out and said so on a
+            # line starting "SKIP" (no GPU wheel, a screen that cannot be
+            # grabbed). One line per suite hides that: collect them.
+            inner_skips += [(name, ln.strip()) for ln in out.splitlines() if ln.strip().startswith(("SKIP ", "SKIP:"))]
     for name, out in failed:
         print("\n" + "=" * 70 + f"\nFAILED: {name} — output:\n" + "=" * 70)
         print("\n".join(out.splitlines()[-60:]))
@@ -97,6 +116,12 @@ def main(argv):
           + (f" ({', '.join(skipped)})" if skipped else ""))
     if self_skipped:
         print(f"{len(self_skipped)} of those skipped themselves and tested nothing: {', '.join(self_skipped)}")
+    if inner_skips:
+        print(f"{len(inner_skips)} check(s) were left out inside suites that passed:")
+        for name, ln in inner_skips:
+            print(f"  {name}: {ln[:150]}")
+        if os.environ.get(hidden_desktop.ENV_FLAG) and any("screen" in ln for _, ln in inner_skips):
+            print("  (the screen cannot be grabbed from a private desktop: run that suite with --visible for those)")
     if failed:
         print("FAILED: " + ", ".join(n for n, _ in failed))
         return 1
