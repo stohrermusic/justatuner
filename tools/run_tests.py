@@ -51,6 +51,7 @@ def main(argv):
     suites = sorted(f for f in os.listdir(TOOLS) if f.startswith("test_") and f.endswith(".py"))
     env = dict(os.environ, PYTHONIOENCODING="utf-8")
     failed, skipped, ran = [], [], 0
+    self_skipped = []
     t_all = time.time()
     for fname in suites:
         name = fname[:-3]
@@ -78,7 +79,14 @@ def main(argv):
             print(f"skip {name:28s} {time.time() - t0:5.1f}s  needs {missing} (not installed here, by design)", flush=True)
             continue
         status = "ok  " if code == 0 else "FAIL"
-        print(f"{status} {name:28s} {time.time() - t0:5.1f}s  {summary_line(out)[:72]}", flush=True)
+        verdict = summary_line(out)
+        if code == 0 and verdict.lower().startswith("skipping"):
+            # A suite that skipped itself (no display, no audio) tested
+            # nothing: say so in the count. On 2026-11-25 a Linux runner with
+            # no sound server reported every GUI suite as "ok".
+            status = "skip"
+            self_skipped.append(name)
+        print(f"{status} {name:28s} {time.time() - t0:5.1f}s  {verdict[:72]}", flush=True)
         if code != 0:
             failed.append((name, out))
     for name, out in failed:
@@ -87,6 +95,8 @@ def main(argv):
     print("\n" + "-" * 70)
     print(f"{ran} suites run in {time.time() - t_all:.0f}s, {len(failed)} failed, {len(skipped)} skipped"
           + (f" ({', '.join(skipped)})" if skipped else ""))
+    if self_skipped:
+        print(f"{len(self_skipped)} of those skipped themselves and tested nothing: {', '.join(self_skipped)}")
     if failed:
         print("FAILED: " + ", ".join(n for n, _ in failed))
         return 1

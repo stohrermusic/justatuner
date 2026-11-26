@@ -217,7 +217,10 @@ class TunerEngine:
 
     def start(self, device=None):
         """Start audio capture. Returns (success, error_message)."""
-        if not AUDIO_AVAILABLE:
+        # The synthetic source opens no stream, so it needs numpy only: a
+        # machine whose sound system will not start (a CI runner with no
+        # sound server, 2026-11-25) still runs the tuner's own tests.
+        if np is None or (sd is None and not self.synthetic_hz):
             return False, "Audio libraries not available.\nInstall numpy and sounddevice:\n  pip install numpy sounddevice"
 
         if self._running:

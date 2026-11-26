@@ -76,16 +76,17 @@ test(f"Hann estimator on a pure Hann lobe within 0.01 bin (worst {worst_bin:.4f}
      worst_bin < 0.01)
 
 # A note that decays during the frame broadens its lobe on both sides, and
-# NEITHER closed form is exact on it. Until 2026-11-25 this check tried only
-# offsets within 0.01 bin of a bin centre and concluded "the two-neighbour
-# form reads 0.000": true there and nowhere else (the SSC session swept the
-# whole bin and said so). Over every offset in a bin the two forms have the
-# same worst error (20 ms decay: 0.105 one-neighbour, 0.107 two-neighbour)
-# and the same 0.21-bin jump, at the bin centre for the one-neighbour form
-# and half way between bins for this one. The bounds below are the measured
-# ones for the form in use; at a realistic decay (300 ms and slower) the
-# error is under 0.001 bin, 0.04 c at A4, either way.
-_decay_worst, _decay_centre = {}, 0.0
+# NEITHER closed form is exact on it. From 2026-10-06 to 2026-11-25 the app
+# used the two-neighbour form, on a check here that tried only offsets
+# within 0.01 bin of a bin centre and concluded it "reads 0.000": true there
+# and nowhere else (the SSC session swept the whole bin and said so). Over
+# every offset in a bin the two forms have the same worst error (20 ms
+# decay: 0.105 one-neighbour, 0.107 two-neighbour) and the same 0.21-bin
+# jump, at the bin centre for the one-neighbour form and half way between
+# bins for the other. The app is back on the one-neighbour form, SSC's. The
+# bounds are the measured ones; at a realistic decay (300 ms and slower) the
+# error is under 0.001 bin, 0.04 c at A4.
+_decay_worst = {}
 for tau_s in (0.3, 0.1, 0.02):
     env = np.exp(-_t / tau_s)
     errs = []
@@ -94,14 +95,10 @@ for tau_s in (0.3, 0.1, 0.02):
         mags = np.abs(np.fft.rfft(np.sin(2 * np.pi * f * _t) * env * _w))
         errs.append(hann_peak_freq(mags, 40, _bin) / _bin - 40 - d_true)
     _decay_worst[tau_s] = float(np.max(np.abs(errs)))
-    _decay_centre = max(_decay_centre, float(np.max(np.abs(errs[49:52]))))
 test("Hann estimator on a decaying note, worst over every offset in a bin: "
      f"300 ms {_decay_worst[0.3]:.4f} (< 0.002), 100 ms {_decay_worst[0.1]:.4f} (< 0.01), "
      f"20 ms {_decay_worst[0.02]:.4f} (< 0.12) bin",
      _decay_worst[0.3] < 0.002 and _decay_worst[0.1] < 0.01 and _decay_worst[0.02] < 0.12)
-test(f"...and no jump across a bin centre, where the one-neighbour form flips sign "
-     f"(within 0.01 bin of the centre, down to a 20 ms decay: {_decay_centre:.4f} < 0.003 bin)",
-     _decay_centre < 0.003)
 
 # Every semitone A1-A6 at 440-tuning, exactly in tune, through the engine.
 # Pure sine first: this is the estimator alone (old code: 15.3 c worst).
@@ -287,13 +284,20 @@ _probe = subprocess.run(
      "print(e.np is not None, e.sd is None, e.AUDIO_AVAILABLE)\n"
      "import numpy as np\n"
      "r = e.TunerEngine().analyze_buffer((0.5 * np.sin(2 * np.pi * 440 * np.arange(8192) / 44100)).astype(np.float32))\n"
-     "print(r.active[9])" % os.path.dirname(os.path.dirname(os.path.abspath(__file__)))],
+     "print(r.active[9])\n"
+     "eng = e.TunerEngine(); eng.synthetic_hz = 440.0\n"
+     "print(eng.start()[0], e.TunerEngine().start()[0])" % os.path.dirname(os.path.dirname(os.path.abspath(__file__)))],
     capture_output=True, text=True)
 _lines = _probe.stdout.split()
 test(f"with sounddevice blocked: np bound, sd None, AUDIO_AVAILABLE False ({_probe.stdout.strip() or _probe.stderr.strip()[-120:]})",
      _probe.returncode == 0 and _lines[:3] == ["True", "True", "False"])
 test("with sounddevice blocked: analyze_buffer still lights the A wheel",
      _probe.returncode == 0 and len(_lines) > 3 and _lines[3] == "True")
+# The synthetic source opens no stream, so it starts with no sound library;
+# a real start still refuses. On a CI runner with no sound server the
+# synthetic checks below failed for want of PortAudio (2026-11-25).
+test(f"with sounddevice blocked: the synthetic source starts, a real start refuses ({_lines[4:6]})",
+     _probe.returncode == 0 and _lines[4:6] == ["True", "False"])
 
 
 # ============================================

@@ -147,11 +147,15 @@ def main():
           lambda: min_w <= 1280 and min_h <= 621)
 
     def minimum_is_what_the_tabs_ask():
+        # The notebook's own request: its widest tab plus its own frame,
+        # which is 4 px on Windows and 54 on Aqua (this check allowed 40 and
+        # failed on the Mac runner, 2026-11-25).
         at(min_w, min_h)
         need_w = max(app.tuner_frame.winfo_reqwidth(), app.exerciser_frame.winfo_reqwidth())
+        asked = min(app.notebook.winfo_reqwidth(), sw)
         assert min_w >= need_w, f"minimum width {min_w} is under the {need_w} px the tabs ask for"
-        assert min_w <= need_w + 40, f"minimum width {min_w} is well over the {need_w} px the tabs ask for"
-    check("the minimum width is what the wider tab asks for, not a guess", minimum_is_what_the_tabs_ask)
+        assert min_w == asked, f"minimum width {min_w} is not the {asked} px the notebook asks for"
+    check("the minimum width is what the notebook asks for its wider tab, not a guess", minimum_is_what_the_tabs_ask)
 
     # ---- the tuner bar: the pilot stays in the middle ----
     def pilot_centred():

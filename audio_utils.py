@@ -96,29 +96,25 @@ def hann_peak_freq(mags, k, bin_freq):
     Hann main lobe and lands up to ~0.05 bin off — on the tuner's 10.77 Hz
     bins that is 0.54 Hz, which at A1 (55 Hz) is 17 cents and at A2 is
     8 cents (measured 2026-10-06: an exactly in-tune A1–A6 sweep read up
-    to 15.3 c off, worst at B1). For a Hann window the neighbours fix the
-    offset exactly: |X[k+1]| / |X[k]| = (1 + d) / (2 - d) and
-    |X[k-1]| / |X[k]| = (1 - d) / (2 + d), and the two together give
-    d = 2 (R - L) / (L + 2 P + R), which is exact on a clean lobe (the
-    same 0.0002 bin as the one-neighbour form (2a-1)/(a+1) that SSC uses)
-    and symmetric about a bin centre.
+    to 15.3 c off, worst at B1). For a Hann window the larger neighbour
+    fixes the offset exactly: with a = |X[k+1]| / |X[k]| = (1 + d) / (2 - d),
+    d = (2a - 1) / (a + 1), and the mirror image on the other side. Exact
+    on a clean lobe to 0.0002 bin. This is the form SSC uses; the two apps
+    share one estimator on purpose, so a fix to it ports both ways.
 
-    Neither form is exact on a note that decays during the frame, which
-    broadens the lobe. Corrected 2026-11-25: the 2026-10-06 note here said
-    this form "reads 0.000" where the one-neighbour form read 0.105 bin on
-    a 20 ms decay; that was measured only within 0.01 bin of a bin centre.
-    Over every offset in a bin both forms have the same worst error (0.105
-    and 0.107 bin at 20 ms, 0.006 and 0.007 at 100 ms, 0.0008 and 0.0009
-    at 300 ms) and the same 0.21-bin jump: at the bin centre for the
-    one-neighbour form, half way between two bins for this one. Through
-    the tuner on struck notes C2-C6 this form was no better (300 ms decay:
-    median worst error 4.3 c against 3.3 c, the smaller error on 14 notes
-    of 49 against 33). It stays for now on the tuner alone; SSC keeps the
-    one-neighbour form because its Analyzer's vibrato readings got worse
-    with this one.
+    It is not exact on a note that decays during the frame, which broadens
+    the lobe: over every offset in a bin the worst error is 0.0008 bin at
+    a 300 ms decay, 0.006 at 100 ms, 0.105 at 20 ms, with a jump of twice
+    that across a bin centre (the two neighbours tie there and the sign
+    flips). From 2026-10-06 to 2026-11-25 this was the two-neighbour form
+    d = 2 (R - L) / (L + 2 P + R), adopted on a gate that sampled only bin
+    centres. Swept over the whole bin it has the same worst error and the
+    same jump, half way between bins instead, and through the tuner on
+    struck notes C2-C6 it was no better (300 ms decay: median worst error
+    4.3 c against 3.3 c for this form). Matt, 2026-11-25: "Yes, match SSC".
 
-    Rejected alternative, measured in SSC: a 4x zero-padded FFT is equally
-    accurate at four times the cost.
+    Rejected alternatives, measured: the two-neighbour form (above), and
+    in SSC a 4x zero-padded FFT, equally accurate at four times the cost.
 
     The formula needs k to be the lobe's maximum, but callers pick k from
     a fixed window (the engine looks at the 3 bins round the reference
@@ -145,7 +141,12 @@ def hann_peak_freq(mags, k, bin_freq):
     if peak <= 0:
         return k * bin_freq
     left, right = float(mags[k - 1]), float(mags[k + 1])
-    d = 2.0 * (right - left) / (left + 2.0 * peak + right)
+    if right >= left:
+        a = right / peak
+        d = (2.0 * a - 1.0) / (a + 1.0)
+    else:
+        a = left / peak
+        d = -(2.0 * a - 1.0) / (a + 1.0)
     d = max(-0.5, min(0.5, d))
     return (k + d) * bin_freq
 

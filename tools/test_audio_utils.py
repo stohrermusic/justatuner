@@ -196,18 +196,16 @@ got9 = hann_peak_freq(lobe, 9, 1.0)
 test(f"k=9, peak three bins down: climb stops at 7, d clamps to -0.5 -> 6.5 (got {got9})", got9 == 6.5)
 sym = hann_peak_freq(np.array([0.0, 0.5, 1.0, 0.5, 0.0]), 2, 1.0)
 test(f"symmetric Hann on-bin neighbours [0.5, 1, 0.5]: d = 0 (got {sym - 2:+.4f})", sym == 2.0)
-# A lobe broadened symmetrically (e.g. a note decaying inside the frame)
-# has equal neighbours above 0.5. The one-sided formula uses whichever
-# neighbour wins the >= tie and reads d = (2a-1)/(a+1) = +0.333 here; the
-# answer by symmetry is 0. Measured 2026-10-06 on an exactly-on-bin tone
-# decaying with tau 50 ms: +0.021 bin, and -0.030/+0.030 for tones only
-# +-0.01 bin either side (tau 20 ms: +-0.11 bin) -- a jump across d = 0.
-# 2(R-L)/(L+2P+R) is equally exact on a clean Hann lobe and gives 0 here.
-# (2026-11-25: it is no better over the whole bin; its jump of the same
-# size sits half way between bins. See the sweep in test_tuner_engine.)
-symb = hann_peak_freq(np.array([0.0, 0.8, 1.0, 0.8, 0.0]), 2, 1.0)
-test(f"symmetric broadened neighbours [0.8, 1, 0.8]: d = 0 (got {symb - 2:+.4f})",
-     abs(symb - 2.0) < 1e-9)
+# Which closed form: the one-neighbour one, d = (2a-1)/(a+1) on the larger
+# neighbour, the same as SSC's so the two apps share one estimator (Matt,
+# 2026-11-25: "Yes, match SSC"). From 2026-10-06 until then this was the
+# two-neighbour form 2(R-L)/(L+2P+R), which reads +0.4 on the first lobe
+# below; it was adopted on a gate that sampled only bin centres and is no
+# better over the whole bin (see the sweep in test_tuner_engine).
+up = hann_peak_freq(np.array([0.0, 0.2, 1.0, 0.8, 0.0]), 2, 1.0) - 2
+down = hann_peak_freq(np.array([0.0, 0.8, 1.0, 0.2, 0.0]), 2, 1.0) - 2
+test(f"the one-neighbour form, as in SSC: neighbours [0.2, 1, 0.8] read d = +1/3, mirrored -1/3 (got {up:+.4f}, {down:+.4f})",
+     abs(up - 1.0 / 3.0) < 1e-9 and abs(down + 1.0 / 3.0) < 1e-9)
 
 
 # ============================================

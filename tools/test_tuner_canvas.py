@@ -509,8 +509,17 @@ def main():
 
     def pacer_on_a_real_timer():
         import time
+        # In a window that is on screen, as the tuner is when anyone is
+        # watching it. With the root withdrawn this measured what the system
+        # does to an app with nothing visible: the Mac runner gave it coarse
+        # timers (median frame 64.0 fps, 2026-11-25) while the tab itself, in
+        # a visible window on the same runner, held 60; this PC did the same
+        # in 3 runs of 3 that afternoon after passing all morning (Windows 11
+        # does not promise a hidden process its timer resolution).
         root = tk.Tk()
-        root.withdraw()
+        root.title("frame pacing check")
+        root.geometry("260x60+30+30")
+        root.update()
         holds_before = tv._fine_timer_holds
         held = tv.fine_timer(True)
         pacer, stamps = tv.FramePacer(), []

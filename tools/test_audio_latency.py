@@ -245,8 +245,14 @@ al.sd = None
 r = al.measure()
 al.sd = _saved
 test("sd None: ok False", r.ok is False)
-test(f"sd None: message 'sounddevice is not installed.' (got {r.message!r})",
-     r.message == "sounddevice is not installed.")
+# The message gives the real reason when there is one: on a machine whose
+# sound system would not start (a CI runner with no sound server, where this
+# check failed on 2026-11-25 for expecting only the first wording).
+import audio_utils  # noqa: E402
+
+_why = audio_utils.sounddevice_error()
+_want = f"No audio: {_why}." if _why else "sounddevice is not installed."
+test(f"sd None: the message says why ({r.message[:70]!r})", r.message == _want)
 
 print()
 print(f"Results: {passed} passed, {failed} failed out of {passed + failed}")

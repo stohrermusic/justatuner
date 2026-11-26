@@ -41,6 +41,23 @@ jobs:
       - name: Install system libraries (Linux)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libportaudio2 xvfb
+      - name: Sound server (Linux)
+        if: runner.os == 'Linux'
+        # Best effort and evidence, never a failure (from SSC, 2026-11-12).
+        # PortAudio starts when sounddevice is imported and needs the
+        # runner's sound server; when none answers, the app and the pure
+        # math suites still run, but every GUI suite skips itself (the
+        # 2026-11-25 run: "PulseAudio_Initialize: Can't connect to server").
+        # This says in the log whether one was answering and tries to start
+        # one; run_tests.py says how many suites skipped themselves.
+        continue-on-error: true
+        run: |
+          command -v pactl >/dev/null || { echo "no pactl on this runner: cannot ask the sound server"; exit 0; }
+          if pactl info >/tmp/sound-server 2>&1; then head -3 /tmp/sound-server; exit 0; fi
+          echo "no sound server answering; trying to start one"
+          (pulseaudio --start --exit-idle-time=-1 2>&1 || systemctl --user start pipewire-pulse 2>&1 || true)
+          sleep 2
+          if pactl info >/tmp/sound-server 2>&1; then head -3 /tmp/sound-server; else echo "still no sound server: PortAudio may not start on this runner"; fi
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
@@ -110,6 +127,18 @@ jobs:
         # at build time, so the GPU renderer crate needs it to link.
         # xvfb: the frozen-build probe and the GPU suites need a display.
         run: sudo apt-get update && sudo apt-get install -y libportaudio2 libx11-dev xvfb
+
+      - name: Sound server (Linux)
+        if: runner.os == 'Linux'
+        # Best effort and evidence, never a failure; see the test job's step.
+        continue-on-error: true
+        run: |
+          command -v pactl >/dev/null || { echo "no pactl on this runner: cannot ask the sound server"; exit 0; }
+          if pactl info >/tmp/sound-server 2>&1; then head -3 /tmp/sound-server; exit 0; fi
+          echo "no sound server answering; trying to start one"
+          (pulseaudio --start --exit-idle-time=-1 2>&1 || systemctl --user start pipewire-pulse 2>&1 || true)
+          sleep 2
+          if pactl info >/tmp/sound-server 2>&1; then head -3 /tmp/sound-server; else echo "still no sound server: PortAudio may not start on this runner"; fi
 
       - name: Install Python dependencies
         run: |
