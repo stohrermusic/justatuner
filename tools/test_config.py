@@ -269,6 +269,70 @@ except Exception as e:  # noqa: BLE001
 test("query_devices raising -> [] with no exception", err is None and got == [])
 test("enumeration failure logged", any("Could not enumerate input devices" in m for m in cap.messages))
 
+# ============================================
+# 2026-11-28: the drone played into "the system default", which was a USB
+# microphone's own headphone jack. The playback device is now a choice, saved
+# by name like the microphone.
+print("\n--- output devices: the list, and the saved choice by name ---")
+
+
+def out(name, outs, api, ins=0):
+    return {"name": name, "max_input_channels": ins, "max_output_channels": outs,
+            "hostapi": api, "default_samplerate": 44100.0}
+
+
+FAKE_OUT = [out("Microsoft Sound Mapper - Output", 2, 0),            # 0 sound mapper
+            out("Microphone (AT2020USB-X)", 0, 0, ins=1),            # 1 input only
+            out("Speakers (Realtek High Definition Audio)", 2, 0),   # 2 kept
+            out("Headphones (AT2020USB-X)", 2, 0),                   # 3 kept
+            out("Primary Sound Driver", 2, 1),                       # 4 other host API
+            out("Speakers (Realtek High Definition Audio)", 2, 1),   # 5 other host API
+            out("Speakers (Realtek HD Audio output with SST)", 2, 2),  # 6 other host API, another name
+            out("Headset (Hands-Free AG Audio)", 1, 0),              # 7 hands-free
+            out("Speakers (Realtek High Definiti", 2, 0)]            # 8 same first 30 characters as 2
+sys.modules["sounddevice"] = types.SimpleNamespace(
+    query_devices=lambda: FAKE_OUT, default=types.SimpleNamespace(device=(1, 2)))
+get_out = getattr(config, "get_output_devices", lambda: None)
+got = get_out()
+test(f"playback devices: only the default host API's, no aliases, no duplicates (got {got})",
+     got == [(2, "Speakers (Realtek High Definition Audio)"), (3, "Headphones (AT2020USB-X)")])
+sys.modules["sounddevice"] = types.SimpleNamespace(
+    query_devices=lambda: FAKE_OUT, default=types.SimpleNamespace(device=(-1, -1)))
+got = get_out() or []
+test("with no default output to go by, every host API is listed (still no aliases)",
+     [i for i, _ in got] == [2, 3, 6])
+cap.messages.clear()
+sys.modules["sounddevice"] = types.SimpleNamespace(query_devices=boom)
+test("the list is [] and a line is logged when the devices cannot be read",
+     get_out() == [] and any("Could not enumerate output devices" in m for m in cap.messages))
+
+OUTS = [(2, "Speakers (Realtek(R) Audio)"), (3, "Headphones (AT2020USB-X)")]
+real_get_out = getattr(config, "get_output_devices", None)
+config.get_output_devices = lambda: list(OUTS)
+resolve_out = getattr(config, "resolve_output_device", lambda st: "missing")
+remember_out = getattr(config, "remember_output_device", lambda st, i: None)
+st = {}
+remember_out(st, 3)
+test("picking a playback device saves its name and index",
+     st == {"audio_output_device": 3, "audio_output_device_name": "Headphones (AT2020USB-X)"})
+config.get_output_devices = lambda: [(2, "Speakers (Realtek(R) Audio)"), (5, "Headphones (AT2020USB-X)")]
+test("the saved device is found by name at a new index (3 -> 5)",
+     resolve_out(st) == 5 and st.get("audio_output_device") == 5)
+config.get_output_devices = lambda: [(2, "Speakers (Realtek(R) Audio)")]
+cap.messages.clear()
+test("a saved device that is not connected: the system default (None), said in the log",
+     resolve_out(st) is None and any("Saved output device" in m for m in cap.messages))
+test("... and its name is kept, so it is used again when it comes back",
+     st.get("audio_output_device_name") == "Headphones (AT2020USB-X)" and st.get("audio_output_device") is None)
+remember_out(st, None)
+test("picking System Default clears both", st == {"audio_output_device": None, "audio_output_device_name": None})
+test("no saved device: None", resolve_out({}) is None)
+test("the two keys are in DEFAULT_SETTINGS (a key that is not there is lost at the next load)",
+     config.DEFAULT_SETTINGS.get("audio_output_device", "missing") is None
+     and config.DEFAULT_SETTINGS.get("audio_output_device_name", "missing") is None)
+if real_get_out is not None:
+    config.get_output_devices = real_get_out
+
 # PortAudio lists devices once, when it starts: a microphone plugged in after
 # launch was never offered (SSC, Matt, 2026-11-12). A rescan terminates and
 # re-initialises it, in that order.

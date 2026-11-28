@@ -269,6 +269,102 @@ def main():
           lambda: ex.engine._input_device == 2 and ex.input_device.get() == "Built-in Microphone")
     app.settings["audio_input_device"] = app.settings["audio_input_device_name"] = None
 
+    # ---- Where the drone plays (2026-11-28) ----
+    # Matt: "I cant get any soud to come out on the drone". The output was
+    # "the system default", which was his USB microphone's headphone jack,
+    # and nothing on the tab said so. From here on the engine's output opener
+    # is a stand-in that records which device was asked for: no real device
+    # is opened by index.
+    outs = {"devices": [(4, "Speakers (Built-in)"), (6, "Headphones (USB microphone)")]}
+    config.get_output_devices = lambda: list(outs["devices"])
+    if hasattr(ev, "get_output_devices"):
+        ev.get_output_devices = config.get_output_devices
+    opened = []
+    refuse = {"all": False}
+
+    class _DummyStream:
+        def stop(self):
+            pass
+
+        def close(self):
+            pass
+
+    def fake_open():
+        eng = ex.engine
+        if eng._output_stream is not None:
+            return
+        if refuse["all"]:
+            eng.output_error = "no playback device"
+            return
+        opened.append(getattr(eng, "_output_device", "old engine"))
+        eng._output_stream = _DummyStream()
+        eng.output_error = eng.output_note = None
+    ex.engine._start_output_stream = fake_open
+
+    def out_line():
+        return ex.output_status.cget("text")
+
+    def out_labels():
+        m = ex._output_menu
+        return [m.entrycget(i, "label") for i in range(m.index("end") + 1) if m.type(i) == "radiobutton"]
+
+    def pick_output(label):
+        m = ex._output_menu
+        for i in range(m.index("end") + 1):
+            if m.type(i) == "radiobutton" and m.entrycget(i, "label") == label:
+                m.invoke(i)
+                return True
+        return False
+
+    _run(app, 0.3)
+    check("the tab says where the drone plays: the system default, to begin with",
+          lambda: out_line() == "Output: system default")
+    ex._refresh_output_menu()
+    check("Exerciser Options > Output > Output Device lists System Default and the playback devices",
+          lambda: out_labels() == ["System Default", "Speakers (Built-in)", "Headphones (USB microphone)"])
+    check("picking a device there is found in the menu", lambda: pick_output("Speakers (Built-in)"))
+    _run(app, 0.2)
+    check(f"the drone's output is reopened on the device picked (opened {opened})", lambda: opened == [4])
+    check("the pick is saved by name",
+          lambda: app.settings["audio_output_device_name"] == "Speakers (Built-in)"
+          and app.settings["audio_output_device"] == 4)
+    check("the tab names the device", lambda: out_line() == "Output: Speakers (Built-in)")
+
+    def rescan_moves_outputs():
+        outs["devices"] = [(4, "Headphones (USB microphone)"), (7, "Speakers (Built-in)")]
+        return True
+    config.rescan_input_devices = rescan_moves_outputs
+    ex._on_refresh_devices()
+    _run(app, 0.3)
+    check(f"after Refresh Devices the saved output is found by name at its new index, 4 -> 7 (opened {opened})",
+          lambda: ex.engine._output_device == 7 and opened[-1] == 7 and out_line() == "Output: Speakers (Built-in)")
+
+    def rescan_loses_output():
+        outs["devices"] = [(4, "Headphones (USB microphone)")]
+        return True
+    config.rescan_input_devices = rescan_loses_output
+    ex._on_refresh_devices()
+    _run(app, 0.3)
+    check(f"a saved output that is gone: the system default, and the tab says which device is missing ({out_line()!r})",
+          lambda: ex.engine._output_device is None and opened[-1] is None
+          and "system default" in out_line() and "Speakers (Built-in) is not connected" in out_line())
+    check("... and its name is still saved for when it comes back",
+          lambda: app.settings["audio_output_device_name"] == "Speakers (Built-in)")
+
+    refuse["all"] = True
+    ex.engine._output_stream = None
+    ex.engine.output_error = "no playback device"
+    _run(app, 0.3)
+    check(f"with no sound output at all the tab says so, and why ({out_line()!r})",
+          lambda: out_line() == "No sound output: no playback device")
+    refuse["all"] = False
+    check("picking System Default is in the menu", lambda: pick_output("System Default"))
+    _run(app, 0.2)
+    check("System Default clears the saved device and the tab says system default",
+          lambda: app.settings["audio_output_device_name"] is None and out_line() == "Output: system default"
+          and ex.output_device.get() == "Default")
+    config.rescan_input_devices = lambda: True
+
     # Switching back to the tuner stops the drone.
     app.notebook.select(app.tuner_frame)
     _run(app, 0.5)

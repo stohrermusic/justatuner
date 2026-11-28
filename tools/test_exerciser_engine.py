@@ -193,6 +193,7 @@ print("\n--- get_pitch on the synthetic source ---")
 e = AudioEngine()
 e.synthetic_hz = 196.0
 e._start_input_stream = lambda: None   # never a real device in a test
+e._start_output_stream = lambda: None  # nor a real output: get_pitch() checks its health too
 e.running = True                       # start() needs sounddevice; the path under test does not
 for _ in range(6):
     f, c = e.get_pitch()
@@ -247,6 +248,7 @@ def drone_blocks(e, n=2):
 
 e = AudioEngine()
 e._start_input_stream = lambda: None   # never a real device in a test
+e._start_output_stream = lambda: None  # nor a real output: get_pitch() checks its health too
 e.monitoring = "headphones"
 e.running = True
 e.set_drone(on=True, freq=130.81, voicing="root", dtype="rich", volume=0.3)
@@ -274,6 +276,136 @@ fn, cn = yin_detect(y, 44100, fmin=65, fmax=2500, threshold=0.25)
 test(f"sample-drone notch: a unison +2.5 c over the bleed still reads a pitch ({cents(fn, 130.81):+.1f} c; leakage, documented)",
      fn is not None)
 
+
+# ============================================
+# WHERE THE DRONE PLAYS, AND AN OUTPUT THAT DIES
+# ============================================
+# 2026-11-28: the drone only ever opened "the system default", which was a USB
+# microphone's own headphone jack, and when that device was unplugged the
+# output was never reopened (the mic has had a health check since v1.1.3).
+# The sound library here is a stand-in: no real device is opened.
+print("\n--- the output device: chosen, refused, absent, dead ---")
+import time  # noqa: E402
+
+import exerciser.engine as eng_mod  # noqa: E402
+
+
+class FakeOut:
+    def __init__(self, device):
+        self.device, self.latency = device, 0.02
+        self.started = self.closed = False
+
+    def start(self):
+        self.started = True
+
+    def stop(self):
+        pass
+
+    def close(self):
+        self.closed = True
+
+
+class FakeSD:
+    """sounddevice's OutputStream only; `refuse` is the set of devices that
+    will not open (None in it = the system default will not open either)."""
+
+    def __init__(self, refuse=()):
+        self.refuse, self.opened = set(refuse), []
+
+    def OutputStream(self, samplerate=None, device=None, **kw):  # noqa: N802 — sounddevice's name
+        if device in self.refuse:
+            raise RuntimeError(f"Error opening OutputStream: device {device} unavailable")
+        st = FakeOut(device)
+        self.opened.append(st)
+        return st
+
+    def devices(self):
+        return [st.device for st in self.opened]
+
+
+def out_engine(fake, device=None):
+    eng = AudioEngine()
+    eng._start_input_stream = lambda: None
+    eng_mod.sd = fake
+    setter = getattr(eng, "set_output_device", None)
+    if setter is not None:
+        setter(device)
+    eng.running = True
+    eng._start_output_stream()
+    return eng
+
+
+real_sd = eng_mod.sd
+try:
+    fake = FakeSD()
+    e = out_engine(fake, device=7)
+    test(f"a chosen output device is the one opened (opened {fake.devices()})",
+         fake.devices() == [7] and fake.opened[0].started)
+    test("... and nothing is wrong: no error, no note",
+         getattr(e, "output_error", "?") is None and getattr(e, "output_note", "?") is None)
+
+    fake = FakeSD(refuse={7})
+    e = out_engine(fake, device=7)
+    test(f"a chosen device that will not open: the drone plays on the system default (opened {fake.devices()})",
+         fake.devices() == [None])
+    test("... and the engine says why the chosen one is not in use",
+         "unavailable" in (getattr(e, "output_note", None) or "") and getattr(e, "output_error", "?") is None)
+
+    fake = FakeSD(refuse={None})
+    e = out_engine(fake)
+    test("no output at all: the reason is kept for the tab to show",
+         e._output_stream is None and "unavailable" in (getattr(e, "output_error", None) or ""))
+    fake.refuse.clear()                       # the device comes back
+    e._last_output_attempt = time.monotonic() - 10.0
+    e.get_pitch()
+    test("... and the next look reopens it once the device is back",
+         e._output_stream is not None and getattr(e, "output_error", "?") is None)
+    n = len(fake.opened)
+    e._last_output_time = time.monotonic()
+    e.get_pitch()
+    test("a healthy output is left alone", len(fake.opened) == n)
+
+    # A dead output: the stream object is there, its callback has stopped.
+    fake = FakeSD()
+    e = out_engine(fake)
+    e.set_drone(on=True, freq=130.81, voicing="root", dtype="rich", volume=0.3)
+    e._bleed_state, e._bleed_gain = "ready", np.ones(8, dtype=complex)
+    e._room = {130.81: (0.1, 0.0, 0.0)}
+    first = fake.opened[0]
+    e._last_output_time = time.monotonic() - 2.0      # no callback for 2 s
+    e._last_output_attempt = time.monotonic() - 1.0   # but it was opened 1 s ago: not yet
+    e.get_pitch()
+    test("an output silent for 2 s is not reopened inside the 3 s pacing", len(fake.opened) == 1)
+    e._last_output_attempt = time.monotonic() - 10.0
+    e.get_pitch()
+    test(f"an output whose callback has stopped is closed and opened again ({len(fake.opened)} opens)",
+         len(fake.opened) == 2 and first.closed and e._output_stream is fake.opened[-1])
+    test("... what was learned about the room is dropped, and the drone is listened to again",
+         e._room == {} and e._bleed_gain is None and e.bleed_status() == "listening")
+
+    # Picking another device while the drone tab is running.
+    fake = FakeSD()
+    e = out_engine(fake)
+    first = fake.opened[0]
+    getattr(e, "set_output_device", lambda d: None)(4)
+    test(f"picking a device while running closes the old output and opens the new one ({fake.devices()})",
+         fake.devices() == [None, 4] and first.closed)
+
+    # The output callback is what proves the stream alive.
+    e._last_output_time = 0.0
+    e._output_callback(np.zeros((64, 1), dtype=np.float32), 64, None, None)
+    test("the output callback stamps the time it ran",
+         time.monotonic() - getattr(e, "_last_output_time", 0.0) < 1.0)
+
+    # The synthetic source (tests, CI): no health check, as for the mic.
+    fake = FakeSD()
+    e = out_engine(fake)
+    e.synthetic_hz = 196.0
+    e._last_output_time = e._last_output_attempt = time.monotonic() - 10.0
+    e.get_pitch()
+    test("with the synthetic source the output is not health-checked", len(fake.opened) == 1)
+finally:
+    eng_mod.sd = real_sd
 
 # ============================================
 print(f"\n{'=' * 50}")

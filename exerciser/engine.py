@@ -35,6 +35,10 @@ INPUT_STALE_S = 1.5
 # ... and we retry opening it, at most this often. Also paces retries
 # when the mic couldn't be opened at all, so plugging one in later works.
 INPUT_RETRY_S = 3.0
+# The same two for the output stream (2026-11-28): its callback runs every
+# OUTPUT_BLOCK (23 ms) whether or not the drone is sounding.
+OUTPUT_STALE_S = 1.5
+OUTPUT_RETRY_S = 3.0
 
 # Drone cancellation when the drone plays through speakers (monitoring
 # "speakers"). The app generates the drone, so each partial arrives at the
@@ -225,6 +229,14 @@ class AudioEngine:
         # Streams
         self._input_stream = None
         self._output_stream = None
+        # Where the drone plays: a PortAudio index, or None for whatever the
+        # system's default output is when the stream opens.
+        self._output_device = None
+        self.output_error = None      # why there is no sound output (None while open)
+        self.output_note = None       # the chosen device would not open: on the default instead
+        self._output_logged = None    # last open failure logged (once per distinct failure)
+        self._last_output_time = 0.0  # last output callback, monotonic
+        self._last_output_attempt = 0.0
 
         self._rebuild_oscillators()
 
@@ -293,21 +305,108 @@ class AudioEngine:
             self.input_error = msg
 
     def _start_output_stream(self):
-        """Start the output stream."""
+        """Start the output stream on the chosen device; if that one will not
+        open (unplugged since it was picked, in use), on the system default,
+        with the reason kept in output_note. With no output at all the reason
+        is in output_error, and _check_output_health tries again."""
         if self._output_stream is not None:
             return  # already running
-        try:
-            self._output_stream, self.sr = open_output_stream(
-                sd, None, SAMPLE_RATE,
-                channels=1,
-                blocksize=OUTPUT_BLOCK,
-                dtype="float32",
-                callback=self._output_callback,
-            )
-            self._output_stream.start()
-        except Exception as e:
-            _log.warning("Could not open audio output: %s", e)
+        now = time.monotonic()
+        self._last_output_attempt = now
+        self.output_note = None
+        candidates = [self._output_device] if self._output_device is None else [self._output_device, None]
+        failure = None
+        for device in candidates:
+            stream = None
+            try:
+                stream, rate = open_output_stream(
+                    sd, device, SAMPLE_RATE,
+                    channels=1,
+                    blocksize=OUTPUT_BLOCK,
+                    dtype="float32",
+                    callback=self._output_callback,
+                )
+                stream.start()
+            except Exception as e:
+                failure = str(e).strip() or type(e).__name__
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except Exception:
+                        pass
+                if (device, failure) != self._output_logged:
+                    # Each distinct failure once, not once per retry.
+                    _log.warning("Could not open audio output (device %r): %s",
+                                 device if device is not None else "default", failure)
+                    self._output_logged = (device, failure)
+                if device is not None:
+                    self.output_note = failure
+                continue
+            self._output_stream, self.sr = stream, rate
+            self._last_output_time = now
+            if self.output_error:
+                _log.warning("Sound output recovered (device %r, %d Hz)",
+                             device if device is not None else "default", rate)
+            self.output_error = None
+            self._output_logged = None
+            return
+        self._output_stream = None
+        self.output_error = failure
+
+    def _close_output_stream(self):
+        if self._output_stream is not None:
+            try:
+                self._output_stream.stop()
+                self._output_stream.close()
+            except Exception:
+                pass
             self._output_stream = None
+
+    def output_open(self):
+        """True while there is an output stream to play the drone through."""
+        return self._output_stream is not None
+
+    def set_output_device(self, device_index):
+        """Play the drone through a different device. None = system default."""
+        self._output_device = device_index
+        if self.running:
+            self._close_output_stream()
+            self._start_output_stream()
+            self._output_reopened()
+
+    def _output_reopened(self):
+        """A new output stream starts at an unknown offset from the mic's
+        clock: what was learned about the room is void, and a sounding drone
+        is listened to again."""
+        self._room = {}
+        if self.drone_on:
+            self._bleed_gain = None       # stale: not to be banked by the reset
+            self._bleed_reset()
+
+    def _check_output_health(self):
+        """Reopen the output if it never opened or its callback went quiet.
+
+        The mic has had this since v1.1.3; the output had nothing, so a
+        playback device that went away (a USB microphone with a headphone
+        jack, unplugged; 2026-11-28) left the drone silent until the tab was
+        left and entered again. Called from get_pitch() on the UI timer,
+        paced by OUTPUT_RETRY_S. Stands down with the synthetic source, as
+        the mic's check does.
+        """
+        if not self.running or self.synthetic_hz:
+            return
+        now = time.monotonic()
+        if self._output_stream is not None and (now - self._last_output_time) <= OUTPUT_STALE_S:
+            return
+        if (now - self._last_output_attempt) <= OUTPUT_RETRY_S:
+            return
+        if self._output_stream is not None:
+            _log.warning("Sound output went silent for %.1fs; reopening",
+                         now - self._last_output_time)
+            self._close_output_stream()
+        self._start_output_stream()
+        if self._output_stream is not None:
+            self._output_reopened()
 
     def silent_seconds(self):
         """Seconds since the mic last delivered a non-zero sample (0.0 when
@@ -356,13 +455,7 @@ class AudioEngine:
             except Exception:
                 pass
             self._input_stream = None
-        if self._output_stream is not None:
-            try:
-                self._output_stream.stop()
-                self._output_stream.close()
-            except Exception:
-                pass
-            self._output_stream = None
+        self._close_output_stream()
 
     def set_input_device(self, device_index):
         """Switch to a different input device. Pass None for system default."""
@@ -422,6 +515,7 @@ class AudioEngine:
         if self.synthetic_hz and self.running:
             self._feed_synthetic()
         self._check_input_health()
+        self._check_output_health()
         with self.buffer_lock:
             if not self.buffer_ready:
                 return self.latest_pitch, self.latest_confidence
@@ -687,6 +781,7 @@ class AudioEngine:
                     self._recording_chunks.append(data.copy())
 
     def _output_callback(self, outdata, frames, time_info, status):
+        self._last_output_time = time.monotonic()
         if not self._osc_freqs:
             outdata[:] = 0
             return

@@ -86,4 +86,4 @@ User settings live in `app_settings.json` at:
 
 Schema lives in `config.py`'s `DEFAULT_SETTINGS`. Anything read at runtime MUST exist in `DEFAULT_SETTINGS` — the merge in `load_settings` only preserves keys that already appear in the defaults, so runtime-only keys silently disappear on next launch.
 
-Top-level keys: `tuner_settings` (dict), `exerciser_settings` (dict), `audio_input_device` (int or None — cached PortAudio index), `audio_input_device_name` (str or None — the real persisted choice, see Input device by name), `active_tab` (str — "tuner" or "exerciser").
+Top-level keys: `tuner_settings` (dict), `exerciser_settings` (dict), `audio_input_device` (int or None — cached PortAudio index), `audio_input_device_name` (str or None — the real persisted choice, see Input device by name), `audio_output_device` and `audio_output_device_name` (the drone's playback device, saved the same way; None = the system default), `active_tab` (str — "tuner" or "exerciser").

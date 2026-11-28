@@ -169,6 +169,15 @@ SECTIONS = [
         "it opens; on the drone tab choose Input > Refresh Devices (the "
         "drone pauses for a moment while it looks).",
         "",
+        "Output device: the drone plays through your system's default "
+        "output unless you pick another in Exerciser Options > Output > "
+        "Output Device. The line under the DRONE status says which one "
+        "is in use. No sound? Look there first: a USB microphone with "
+        "a headphone jack is a playback device too, and your system may "
+        "have switched to it when you plugged it in. Your choice is "
+        "remembered; if that device is not connected the drone plays "
+        "on the system default and the line says so.",
+        "",
         "Speakers or headphones (Exerciser Options > Monitoring): with "
         "speakers, the drone leaks into the mic, so whenever the drone "
         "starts or changes note the app listens to the room for a few "

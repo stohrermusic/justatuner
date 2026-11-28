@@ -32,7 +32,8 @@ from exerciser.progression_ui import ProgressionDialog
 from exerciser.widgets import RoundScope
 from status_lamp import StatusLamp
 from config import (get_config_dir, get_input_devices, resolve_input_device,
-                    remember_input_device)
+                    remember_input_device, get_output_devices,
+                    resolve_output_device, remember_output_device)
 
 
 # Frame rates
@@ -111,6 +112,7 @@ class ExerciserView:
         # Input options
         self.instrument = tk.StringVar(value=ex.get("instrument", "Auto"))
         self.input_device = tk.StringVar(value="Default")
+        self.output_device = tk.StringVar(value="Default")
         self.monitoring = tk.StringVar(
             value=ex.get("monitoring", "speakers") if ex.get("monitoring") in ("speakers", "headphones") else "speakers")
 
@@ -205,6 +207,12 @@ class ExerciserView:
         if _dev_idx is not None:
             self.input_device.set(
                 self.settings.get("audio_input_device_name") or "Default")
+        # And the saved playback device, the same way.
+        _out_idx = resolve_output_device(self.settings)
+        self.engine.set_output_device(_out_idx)
+        if _out_idx is not None:
+            self.output_device.set(
+                self.settings.get("audio_output_device_name") or "Default")
         self.engine.set_drone(
             freq=note_freq(self.root_note, self.octave),
             voicing=self.drone_voicing,
@@ -252,6 +260,7 @@ class ExerciserView:
         # By name every time, as the tuner tab does: after a device rescan
         # the saved index may belong to another device.
         self._sync_input_device()
+        self._sync_output_device()
         try:
             self.engine.start()
         except RuntimeError as e:
@@ -259,7 +268,9 @@ class ExerciserView:
             # everything just shows "no signal".
             logging.warning("Exerciser audio error: %s", e)
             self.engine.input_error = str(e)
+            self.engine.output_error = str(e)
         self._update_mic_status()
+        self._update_output_status()
         self._update_scope()
         self._update_analysis()
 
@@ -284,6 +295,7 @@ class ExerciserView:
         except Exception:
             pass
         self._update_mic_status()
+        self._update_output_status()
 
     def save_settings(self):
         """Push UI state into self.settings so the host can persist it."""
@@ -379,6 +391,19 @@ class ExerciserView:
         input_menu.add_cascade(label="Input Device", menu=self._device_menu)
         self._refresh_device_menu()
         input_menu.add_command(
+            label="Refresh Devices", command=self._on_refresh_devices,
+        )
+
+        # Where the drone plays. "System Default" is whatever the OS has
+        # chosen when the stream opens, which is not always where the player
+        # is listening: a USB microphone with a headphone jack is a playback
+        # device too (2026-11-28).
+        output_menu = tk.Menu(options_menu, tearoff=0)
+        options_menu.add_cascade(label="Output", menu=output_menu)
+        self._output_menu = tk.Menu(output_menu, tearoff=0)
+        output_menu.add_cascade(label="Output Device", menu=self._output_menu)
+        self._refresh_output_menu()
+        output_menu.add_command(
             label="Refresh Devices", command=self._on_refresh_devices,
         )
 
@@ -724,6 +749,17 @@ class ExerciserView:
         )
         self.drone_status.pack(anchor="w", pady=(2, 0))
 
+        # Where the drone is playing, or why it is not. A drone that
+        # "plays" into a device nobody is listening to looked exactly like
+        # a working one (Matt, 2026-11-28: "I cant get any soud to come out").
+        self.output_status = tk.Label(
+            frame, text="", font=("Helvetica", 8),
+            fg=COLOR_CREAM_DIM, bg=COLOR_PANEL,
+            justify="left", anchor="w", wraplength=260,
+        )
+        self.output_status.pack(anchor="w", fill="x")
+        self._output_state = None
+
         # MIC indicator: same lamp as the tuner tab. Green good, amber
         # warning with a line of text, dark when no mic input (the open
         # error is shown as text because this tab has nowhere else to
@@ -754,6 +790,31 @@ class ExerciserView:
         text = "Listening to the room…" if status == "listening" else "Playing"
         if self.drone_status.cget("text") != text:
             self.drone_status.config(text=text, fg=COLOR_AMBER if status == "listening" else COLOR_GREEN)
+
+    def _update_output_status(self):
+        """The line under the DRONE status: which device the drone plays
+        through, in red why there is no sound output, in amber when the saved
+        device is not the one in use."""
+        if not hasattr(self, "output_status"):
+            return
+        eng = self.engine
+        saved = self.settings.get("audio_output_device_name")
+        if not self._running:
+            text, fg = "", COLOR_CREAM_DIM
+        elif not eng.output_open():
+            why = eng.output_error
+            text, fg = (f"No sound output: {why}" if why else "No sound output"), "#FF6060"
+        elif eng._output_device is None and saved:
+            text, fg = f"Output: system default ({saved} is not connected)", COLOR_AMBER
+        elif eng.output_note:
+            text, fg = f"Output: system default ({saved or 'the chosen device'} would not open)", COLOR_AMBER
+        elif eng._output_device is None:
+            text, fg = "Output: system default", COLOR_CREAM_DIM
+        else:
+            text, fg = f"Output: {saved or 'chosen device'}", COLOR_CREAM_DIM
+        if (text, fg) != self._output_state:
+            self._output_state = (text, fg)
+            self.output_status.config(text=text, fg=fg)
 
     def _update_mic_status(self):
         """Reflect the engine's input state in the MIC lamp + text."""
@@ -1137,7 +1198,45 @@ class ExerciserView:
         if hook is not None:
             hook()
         self._sync_input_device()
+        self._sync_output_device()
         self._refresh_device_menu()
+        self._refresh_output_menu()
+        self._update_output_status()
+
+    def _on_output_device_changed(self, device_index):
+        """Exerciser Options > Output > Output Device: play through it now
+        (the engine reopens its output and, in speakers mode, listens to the
+        room again) and save it by name."""
+        remember_output_device(self.settings, device_index)
+        self.engine.set_output_device(device_index)
+        self.output_device.set(self.settings.get("audio_output_device_name") or "Default")
+        self._update_output_status()
+
+    def _sync_output_device(self):
+        """Point the engine and the menu's radio mark at the saved playback
+        device, found by name. Only while the engine is stopped."""
+        idx = resolve_output_device(self.settings)
+        if not self.engine.running and idx != self.engine._output_device:
+            self.engine.set_output_device(idx)
+        name = self.settings.get("audio_output_device_name") if idx is not None else None
+        self.output_device.set(name or "Default")
+
+    def _refresh_output_menu(self):
+        if not hasattr(self, "_output_menu"):
+            return
+        self._output_menu.delete(0, "end")
+        self._output_menu.add_radiobutton(
+            label="System Default",
+            variable=self.output_device, value="Default",
+            command=lambda: self._on_output_device_changed(None),
+        )
+        self._output_menu.add_separator()
+        for idx, name in get_output_devices():
+            self._output_menu.add_radiobutton(
+                label=name,
+                variable=self.output_device, value=name,
+                command=lambda i=idx: self._on_output_device_changed(i),
+            )
 
     def _refresh_device_menu(self):
         if not hasattr(self, "_device_menu"):
@@ -1246,6 +1345,7 @@ class ExerciserView:
             return
         freq, confidence = self.engine.get_pitch()
         self._update_mic_status()
+        self._update_output_status()
         self._update_bleed_status()
         self._prog_tick()
         root_freq = note_freq(self.root_note, self.octave)

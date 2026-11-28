@@ -76,6 +76,13 @@ DEFAULT_SETTINGS = {
     # the name at startup. None = system default.
     "audio_input_device": None,
     "audio_input_device_name": None,
+    # Where the drone plays, saved the same way (the name is the truth, the
+    # index a cache). None = whatever the system's default output is at the
+    # moment the stream opens, which is not always where the player is
+    # listening: a USB microphone with a headphone jack is a playback device
+    # too, and Windows may make it the default when it is plugged in.
+    "audio_output_device": None,
+    "audio_output_device_name": None,
     # Which tab is shown at startup
     "active_tab": "tuner",
 }
@@ -127,6 +134,95 @@ def get_input_devices():
     except Exception as e:
         logging.warning("Could not enumerate input devices: %s", e)
         return []
+
+
+def get_output_devices():
+    """Return list of (device_index, device_name) for usable playback devices.
+
+    Same exclusions as get_input_devices (hands-free telephony profiles,
+    the sound-mapper aliases, duplicate names). One more: only the devices
+    of the host API the system's default output is on. Windows lists every
+    playback device once per host API under names that differ, so the
+    name de-duplication does not fold them (measured on the development
+    PC: 19 output entries for 3 devices; 3 once restricted to MME).
+    "System Default" is not in the list: the caller offers it as None.
+    """
+    try:
+        import sounddevice as sd
+        all_devices = list(sd.query_devices())
+        api = None
+        try:
+            default_out = sd.default.device[1]
+            if default_out is not None and 0 <= default_out < len(all_devices):
+                api = all_devices[default_out].get('hostapi')
+        except Exception:  # noqa: BLE001 — no default output: list every host API
+            api = None
+        devices = []
+        seen_names = set()
+        for i, d in enumerate(all_devices):
+            if d['max_output_channels'] <= 0:
+                continue
+            if api is not None and d.get('hostapi') != api:
+                continue
+            name = d['name']
+            name_lower = name.lower()
+            if 'bluetooth' in name_lower or 'hands-free' in name_lower:
+                continue
+            if 'bthhfenum' in name_lower:
+                continue
+            if 'sound mapper' in name_lower:
+                continue
+            if 'primary sound' in name_lower:
+                continue
+            clean_name = name.strip()
+            dedup_key = clean_name[:30].strip()
+            if dedup_key in seen_names:
+                continue
+            seen_names.add(dedup_key)
+            devices.append((i, clean_name))
+        return devices
+    except Exception as e:
+        logging.warning("Could not enumerate output devices: %s", e)
+        return []
+
+
+def resolve_output_device(settings):
+    """Turn the saved playback device into a PortAudio index (or None).
+
+    By name, as resolve_input_device does: exact, then the first 30
+    characters. A saved device that is not connected gives None, the
+    system default, with one line in the log; the saved name is kept, so
+    the device is used again when it comes back.
+    """
+    name = settings.get("audio_output_device_name")
+    if not name:
+        settings["audio_output_device"] = None
+        return None
+    devices = get_output_devices()
+    for idx, dev_name in devices:
+        if dev_name == name:
+            settings["audio_output_device"] = idx
+            return idx
+    key = name[:30].strip()
+    for idx, dev_name in devices:
+        if dev_name[:30].strip() == key:
+            settings["audio_output_device"] = idx
+            return idx
+    logging.warning("Saved output device %r not found; using system default", name)
+    settings["audio_output_device"] = None
+    return None
+
+
+def remember_output_device(settings, index):
+    """Persist a playback device pick (index or None) as name + cached index."""
+    settings["audio_output_device"] = index
+    name = None
+    if index is not None:
+        for idx, dev_name in get_output_devices():
+            if idx == index:
+                name = dev_name
+                break
+    settings["audio_output_device_name"] = name
 
 
 def rescan_input_devices():
