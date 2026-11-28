@@ -300,6 +300,14 @@ def main():
         eng._output_stream = _DummyStream()
         eng.output_error = eng.output_note = None
     ex.engine._start_output_stream = fake_open
+    # A machine with no playback device (the Windows CI runner, 38a7f56) has
+    # no output at this point: the tab's real start could not open one, and it
+    # rightly said "No sound output". The stand-in opens one, so that what
+    # follows starts from the same place everywhere.
+    had_real_output = ex.engine._output_stream is not None
+    ex.engine._start_output_stream()
+    opened.clear()
+    print(f"  INFO  this machine {'has a' if had_real_output else 'has no'} playback device the drone could open")
 
     def out_line():
         return ex.output_status.cget("text")
@@ -317,8 +325,9 @@ def main():
         return False
 
     _run(app, 0.3)
-    check("the tab says where the drone plays: the system default, to begin with",
-          lambda: out_line() == "Output: system default")
+    def says_default():
+        assert out_line() == "Output: system default", f"the line reads {out_line()!r}"
+    check("the tab says where the drone plays: the system default, to begin with", says_default)
     ex._refresh_output_menu()
     check("Exerciser Options > Output > Output Device lists System Default and the playback devices",
           lambda: out_labels() == ["System Default", "Speakers (Built-in)", "Headphones (USB microphone)"])
