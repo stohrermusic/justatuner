@@ -157,7 +157,7 @@ Settings persist between sessions in:
 
 ## Credits
 
-The stroboscopic tuner side is extracted from [Stohrer Sax Shop Companion][ssc], which has been keeping it sharp in real saxophone repair shops for the better part of a year. The just-intonation drone side is the original [JustATone][jat] Python prototype, preserved here after that project pivoted to a Rust/bevy audio-reactive garden visualizer.
+The stroboscopic tuner side is extracted from [Stohrer Sax Shop Companion][ssc], which has been in real saxophone repair shops for the better part of a year. The just-intonation drone side is the original [JustATone][jat] Python prototype, preserved here after that project pivoted to a Rust/bevy audio-reactive garden visualizer.
 
 ## Questions or Feedback
 
